@@ -1,0 +1,54 @@
+[package]
+name = "schedule-manager"
+version = "1.0.0"
+edition = "2024"
+description = "Cross-platform Chinese calendar and schedule manager"
+license = "MIT"
+
+[features]
+default = ["desktop"]
+desktop = ["dep:keyring", "dep:notify-rust", "dep:slint"]
+
+[dependencies]
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+directories = "6.0"
+lunar-lite = "1.3"
+openssl = { version = "0.10", features = ["vendored"] }
+rustls-native-certs = "0.8"
+rusqlite = { version = "0.40", features = ["bundled", "chrono"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+url = "2.5"
+uuid = { version = "1.20", features = ["v4", "serde"] }
+
+[dependencies.slint]
+version = "1.17"
+optional = true
+default-features = false
+features = ["backend-winit", "renderer-femtovg", "compat-1-2", "std", "unstable-winit-030"]
+
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+keyring = { version = "4.1", optional = true }
+notify-rust = { version = "4.12", optional = true, default-features = false }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_EnhancedStorage", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Diagnostics_Debug", "Win32_System_Variant", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem", "Win32_UI_WindowsAndMessaging"] }
+
+[build-dependencies]
+slint-build = "1.17"
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winres = "0.1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[[bin]]
+name = "schedule-manager"
+path = "src/main.rs"
+required-features = ["desktop"]

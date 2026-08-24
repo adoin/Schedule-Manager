@@ -1,0 +1,28 @@
+[package]
+name = "schedule-api"
+version = "0.1.0"
+edition = "2024"
+description = "Schedule Manager sync and authentication API"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0"
+argon2 = "0.5"
+axum = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "rustls-tls"] }
+rand = "0.9"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+rusqlite = { version = "0.40", features = ["bundled", "chrono"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tokio = { version = "1.49", features = ["macros", "rt-multi-thread", "net", "signal", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1.20", features = ["v4", "serde"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

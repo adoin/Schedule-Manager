@@ -1,0 +1,958 @@
+import { ScrollView } from "std-widgets.slint";
+
+export global Theme {
+    in-out property <color> canvas: #f4f1ed;
+    in-out property <color> island: #fffdfb;
+    in-out property <color> island-soft: #f1ece7;
+    in-out property <color> island-active: #e7e8fa;
+    in-out property <color> ink: #292832;
+    in-out property <color> muted: #85818b;
+    in-out property <color> accent: #6878d6;
+    in-out property <color> accent-soft: #dfe3ff;
+    in-out property <color> accent-deep: #4d5ab2;
+    in-out property <color> accent-ink: #ffffff;
+    in-out property <color> shadow: #2f26351f;
+    in-out property <color> danger: #d86472;
+    in-out property <color> holiday: #d66767;
+}
+
+export struct DayCell {
+    date: string,
+    day: string,
+    lunar: string,
+    holiday: string,
+    events: string,
+    in-month: bool,
+    today: bool,
+    selected: bool,
+    off-day: bool,
+    workday: bool,
+    day-kind: string,
+}
+
+export struct CalendarWeek {
+    d0: DayCell,
+    d1: DayCell,
+    d2: DayCell,
+    d3: DayCell,
+    d4: DayCell,
+    d5: DayCell,
+    d6: DayCell,
+}
+
+export struct EventRow {
+    id: string,
+    date: string,
+    time: string,
+    title: string,
+    meta: string,
+    color: color,
+    completed: bool,
+}
+
+component Island inherits Rectangle {
+    background: Theme.island;
+    border-width: 0px;
+    border-radius: 17px;
+    drop-shadow-offset-y: 8px;
+    drop-shadow-blur: 24px;
+    drop-shadow-color: Theme.shadow;
+}
+
+component SoftButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> emphasized: false;
+    in property <bool> danger: false;
+    callback clicked();
+    height: 34px;
+    background: root.emphasized ? Theme.accent : (touch.has-hover ? Theme.island-active : Theme.island-soft);
+    border-width: 0px;
+    border-radius: 10px;
+    drop-shadow-offset-y: root.emphasized ? 4px : 2px;
+    drop-shadow-blur: root.emphasized ? 10px : 5px;
+    drop-shadow-color: Theme.shadow;
+    Text {
+        text: root.label;
+        color: root.emphasized ? Theme.accent-ink : (root.danger ? Theme.danger : Theme.ink);
+        font-size: 12px;
+        font-weight: 650;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    touch := TouchArea { clicked => { root.clicked(); } }
+}
+
+component Field inherits Rectangle {
+    in-out property <string> value;
+    in property <string> placeholder;
+    in property <bool> password: false;
+    height: 38px;
+    background: Theme.island-soft;
+    border-width: 0px;
+    border-radius: 10px;
+    input := TextInput {
+        x: 11px; y: 0px; width: parent.width - 22px; height: parent.height;
+        text <=> root.value;
+        color: Theme.ink;
+        font-size: 13px;
+        input-type: root.password ? InputType.password : InputType.text;
+        single-line: true;
+        vertical-alignment: center;
+    }
+    Text {
+        x: 11px; width: parent.width - 22px; height: parent.height;
+        visible: root.value == "" && !input.has-focus;
+        text: root.placeholder;
+        color: Theme.muted;
+        font-size: 12px;
+        vertical-alignment: center;
+    }
+}
+
+component NumberField inherits Rectangle {
+    in-out property <string> value;
+    in property <string> placeholder;
+    callback edited();
+    callback accepted();
+    height: 38px;
+    background: Theme.island-soft;
+    border-width: 0px;
+    border-radius: 10px;
+    input := TextInput {
+        x: 11px; y: 0px; width: parent.width - 22px; height: parent.height;
+        text <=> root.value;
+        color: Theme.ink;
+        font-size: 13px;
+        input-type: InputType.number;
+        single-line: true;
+        vertical-alignment: center;
+        edited => { root.edited(); }
+        accepted => { root.accepted(); }
+    }
+    Text {
+        x: 11px; width: parent.width - 22px; height: parent.height;
+        visible: root.value == "" && !input.has-focus;
+        text: root.placeholder;
+        color: Theme.muted;
+        font-size: 12px;
+        vertical-alignment: center;
+    }
+}
+
+component PickerField inherits Rectangle {
+    in property <string> value;
+    in property <string> hint;
+    callback clicked();
+    height: 38px;
+    background: touch.has-hover ? Theme.island-active : Theme.island-soft;
+    border-width: 0px;
+    border-radius: 10px;
+    Text {
+        x: 11px; width: parent.width - 76px; height: parent.height;
+        text: root.value;
+        color: Theme.ink;
+        font-size: 12px;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    Text {
+        x: parent.width - 67px; width: 56px; height: parent.height;
+        text: root.hint;
+        color: Theme.muted;
+        font-size: 12px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    touch := TouchArea { clicked => { root.clicked(); } }
+}
+
+component ChoiceChip inherits Rectangle {
+    in property <string> label;
+    in-out property <bool> checked;
+    height: 30px;
+    background: root.checked ? Theme.accent : (touch.has-hover ? Theme.island-active : Theme.island-soft);
+    border-width: 0px;
+    border-radius: 9px;
+    Text {
+        text: root.label;
+        color: root.checked ? Theme.accent-ink : Theme.ink;
+        font-size: 10px;
+        font-weight: 650;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    touch := TouchArea { clicked => { root.checked = !root.checked; } }
+}
+
+component PickerOption inherits Rectangle {
+    in property <string> label;
+    in property <string> detail;
+    in property <bool> selected;
+    callback clicked();
+    height: 52px;
+    background: root.selected ? Theme.island-active : (touch.has-hover ? Theme.island-soft : transparent);
+    border-width: 0px;
+    border-radius: 11px;
+    VerticalLayout {
+        padding-left: 13px; padding-right: 13px; padding-top: 7px; padding-bottom: 7px; spacing: 2px;
+        Text { text: root.label; color: Theme.ink; font-size: 12px; font-weight: 700; vertical-alignment: center; }
+        Text { text: root.detail; color: Theme.muted; font-size: 9px; vertical-alignment: center; overflow: elide; }
+    }
+    touch := TouchArea { clicked => { root.clicked(); } }
+}
+
+component Stepper inherits Rectangle {
+    in property <int> value;
+    in property <string> unit;
+    callback decrease();
+    callback increase();
+    height: 70px;
+    background: Theme.island-soft;
+    border-width: 0px;
+    border-radius: 12px;
+    VerticalLayout {
+        padding: 6px; spacing: 3px;
+        Text { text: root.unit; color: Theme.muted; font-size: 9px; horizontal-alignment: center; }
+        HorizontalLayout {
+            spacing: 4px;
+            SoftButton { width: 27px; label: "−"; clicked => { root.decrease(); } }
+            Text { text: root.value; color: Theme.ink; font-size: 16px; font-weight: 750; horizontal-alignment: center; vertical-alignment: center; horizontal-stretch: 1; }
+            SoftButton { width: 27px; label: "+"; clicked => { root.increase(); } }
+        }
+    }
+}
+
+component TimeStepper inherits Rectangle {
+    in-out property <string> value;
+    in property <string> unit;
+    callback decrease();
+    callback increase();
+    height: 70px;
+    background: Theme.island-soft;
+    border-width: 0px;
+    border-radius: 12px;
+    VerticalLayout {
+        padding: 6px; spacing: 3px;
+        Text { text: root.unit; color: Theme.muted; font-size: 9px; horizontal-alignment: center; }
+        HorizontalLayout {
+            spacing: 4px;
+            SoftButton { width: 27px; label: "−"; clicked => { root.decrease(); } }
+            NumberField { value <=> root.value; placeholder: "00"; horizontal-stretch: 1; height: 34px; }
+            SoftButton { width: 27px; label: "+"; clicked => { root.increase(); } }
+        }
+    }
+}
+
+component Toggle inherits Rectangle {
+    in property <string> label;
+    in-out property <bool> checked;
+    in property <bool> enabled: true;
+    callback toggled();
+    height: 30px;
+    background: transparent;
+    HorizontalLayout {
+        spacing: 8px;
+        Rectangle {
+            width: 30px; height: 18px;
+            background: root.checked ? Theme.accent : Theme.island-soft;
+            border-radius: 9px;
+            Rectangle {
+                x: root.checked ? 14px : 2px; y: 2px; width: 14px; height: 14px;
+                background: Theme.accent-ink; border-radius: 7px;
+                animate x { duration: 150ms; }
+            }
+        }
+        Text { text: root.label; color: Theme.ink; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
+    }
+    TouchArea { enabled: root.enabled; clicked => { root.checked = !root.checked; root.toggled(); } }
+}
+
+component DayCard inherits Rectangle {
+    in property <DayCell> cell;
+    callback selected(string);
+    background: cell.selected ? Theme.island-active : (touch.has-hover ? Theme.island-soft : Theme.island);
+    border-width: 0px;
+    border-radius: 11px;
+    clip: true;
+    opacity: cell.in-month ? 1.0 : 0.42;
+    Rectangle {
+        visible: cell.today;
+        x: 7px; y: 7px; width: 27px; height: 27px;
+        background: Theme.accent;
+        border-radius: 13.5px;
+    }
+    Text {
+        x: 7px; y: 7px; width: 27px; height: 27px;
+        text: cell.day;
+        color: cell.today ? Theme.accent-ink : (cell.off-day ? Theme.holiday : Theme.ink);
+        font-size: 13px; font-weight: 750;
+        horizontal-alignment: center; vertical-alignment: center;
+    }
+    Text {
+        x: 38px; y: 8px; width: parent.width - 44px; height: 20px;
+        text: cell.holiday != "" ? cell.holiday : cell.lunar;
+        color: cell.holiday != "" ? Theme.holiday : Theme.muted;
+        font-size: 10px; horizontal-alignment: right; vertical-alignment: center;
+        overflow: elide;
+    }
+    Text {
+        x: 9px; y: 38px; width: parent.width - 18px; height: parent.height - 43px;
+        text: cell.events;
+        color: Theme.ink;
+        font-size: 10px;
+        vertical-alignment: top;
+        wrap: word-wrap;
+        overflow: elide;
+    }
+    Rectangle {
+        visible: cell.day-kind != "";
+        x: parent.width - 23px; y: parent.height - 22px; width: 17px; height: 17px;
+        background: cell.workday ? Theme.accent-soft : #f9dddd;
+        border-radius: 8.5px;
+        Text {
+            text: cell.day-kind;
+            color: cell.workday ? Theme.accent-deep : Theme.holiday;
+            font-size: 9px; font-weight: 750;
+            horizontal-alignment: center; vertical-alignment: center;
+        }
+    }
+    touch := TouchArea { clicked => { root.selected(root.cell.date); } }
+}
+
+component WeekView inherits Rectangle {
+    in property <CalendarWeek> week;
+    callback selected(string);
+    background: transparent;
+    HorizontalLayout {
+        spacing: 5px;
+        DayCard { horizontal-stretch: 1; cell: root.week.d0; selected(date) => { root.selected(date); } }
+        DayCard { horizontal-stretch: 1; cell: root.week.d1; selected(date) => { root.selected(date); } }
+        DayCard { horizontal-stretch: 1; cell: root.week.d2; selected(date) => { root.selected(date); } }
+        DayCard { horizontal-stretch: 1; cell: root.week.d3; selected(date) => { root.selected(date); } }
+        DayCard { horizontal-stretch: 1; cell: root.week.d4; selected(date) => { root.selected(date); } }
+        DayCard { horizontal-stretch: 1; cell: root.week.d5; selected(date) => { root.selected(date); } }
+        DayCard { horizontal-stretch: 1; cell: root.week.d6; selected(date) => { root.selected(date); } }
+    }
+}
+
+component EventItem inherits Rectangle {
+    in property <EventRow> event-data;
+    in property <bool> selected: false;
+    callback clicked(string);
+    height: 58px;
+    background: root.selected ? Theme.island-active : (touch.has-hover ? Theme.island-soft : transparent);
+    border-width: 0px;
+    border-radius: 11px;
+    Rectangle { x: 7px; y: 10px; width: 4px; height: parent.height - 20px; background: root.event-data.color; border-radius: 2px; }
+    Text { x: 20px; y: 8px; width: 52px; height: 20px; text: root.event-data.time; color: Theme.muted; font-size: 11px; vertical-alignment: center; }
+    Text { x: 76px; y: 7px; width: parent.width - 84px; height: 21px; text: root.event-data.title; color: root.event-data.completed ? Theme.muted : Theme.ink; font-size: 12px; font-weight: 700; overflow: elide; }
+    Text { x: 76px; y: 29px; width: parent.width - 84px; height: 18px; text: root.event-data.completed ? "已完成 · " + root.event-data.meta : root.event-data.meta; color: Theme.muted; font-size: 10px; overflow: elide; }
+    touch := TouchArea { clicked => { root.clicked(root.event-data.id); } }
+}
+
+component OverviewEventItem inherits Rectangle {
+    in property <EventRow> event-data;
+    in property <bool> selected: false;
+    callback clicked(string);
+    height: 66px;
+    background: root.selected ? Theme.island-active : (touch.has-hover ? Theme.island-soft : transparent);
+    border-width: 0px;
+    border-radius: 12px;
+    Rectangle { x: 9px; y: 11px; width: 4px; height: parent.height - 22px; background: root.event-data.color; border-radius: 2px; }
+    Text { x: 25px; y: 8px; width: 96px; height: 22px; text: root.event-data.date; color: Theme.ink; font-size: 11px; font-weight: 700; vertical-alignment: center; overflow: elide; }
+    Text { x: 25px; y: 33px; width: 96px; height: 20px; text: root.event-data.time; color: Theme.muted; font-size: 10px; vertical-alignment: center; overflow: elide; }
+    Text { x: 132px; y: 8px; width: parent.width - 148px; height: 22px; text: root.event-data.title; color: root.event-data.completed ? Theme.muted : Theme.ink; font-size: 13px; font-weight: 750; vertical-alignment: center; overflow: elide; }
+    Text { x: 132px; y: 33px; width: parent.width - 148px; height: 20px; text: root.event-data.completed ? "已完成 · " + root.event-data.meta : root.event-data.meta; color: Theme.muted; font-size: 10px; vertical-alignment: center; overflow: elide; }
+    touch := TouchArea { clicked => { root.clicked(root.event-data.id); } }
+}
+
+component WindowControl inherits Rectangle {
+    in property <string> symbol;
+    in property <bool> close-action: false;
+    callback clicked();
+    width: 40px; height: 28px;
+    background: touch.has-hover ? (root.close-action ? Theme.danger : Theme.island-active) : transparent;
+    border-radius: 8px;
+    Text { text: root.symbol; color: root.close-action && touch.has-hover ? #ffffff : Theme.ink; font-size: 15px; horizontal-alignment: center; vertical-alignment: center; }
+    touch := TouchArea { clicked => { root.clicked(); } }
+}
+
+export component AppWindow inherits Window {
+    title: "Schedule Manager";
+    icon: @image-url("../assets/schedule-logo-64.png");
+    default-font-family: "Microsoft YaHei UI";
+    no-frame: true;
+    resize-border-width: 6px;
+    preferred-width: 1360px;
+    preferred-height: 850px;
+    min-width: 1040px;
+    min-height: 680px;
+    background: Theme.canvas;
+
+    in-out property <[CalendarWeek]> calendar-weeks;
+    in-out property <[EventRow]> selected-events;
+    in-out property <[EventRow]> overview-events;
+    in-out property <int> calendar-view: 1;
+    in-out property <string> overview-title: "全部日程";
+    in-out property <string> overview-empty: "还没有日程";
+    in-out property <string> month-title: "2026年 8月";
+    in-out property <string> selected-date-title: "今天";
+    in-out property <string> status: "本地数据已就绪";
+    in-out property <string> user-label: "登录 / 注册";
+    in-out property <string> selected-event-id;
+    in-out property <string> event-title;
+    in-out property <int> event-schedule-kind: 0;
+    in-out property <string> event-schedule-label: "具体日期与时间";
+    in-out property <string> event-date;
+    in-out property <int> event-date-year: 2026;
+    in-out property <int> event-date-month: 8;
+    in-out property <int> event-date-day: 24;
+    in-out property <string> event-start-time;
+    in-out property <int> event-hour: 9;
+    in-out property <int> event-minute: 0;
+    in-out property <string> event-hour-input: "09";
+    in-out property <string> event-minute-input: "00";
+    in-out property <int> event-lunar-month: 1;
+    in-out property <int> event-lunar-day: 1;
+    in-out property <bool> event-lunar-leap: false;
+    in-out property <string> event-lunar-date: "农历正月初一";
+    in-out property <string> event-duration: "60";
+    in-out property <string> event-location;
+    in-out property <string> event-notes;
+    in-out property <string> event-reminders: "0";
+    in-out property <string> event-custom-reminder;
+    in-out property <bool> reminder-custom-applied: false;
+    in-out property <bool> reminder-at-time: true;
+    in-out property <bool> reminder-10m: false;
+    in-out property <bool> reminder-1h: false;
+    in-out property <bool> reminder-1d: false;
+    in-out property <bool> event-all-day: false;
+    in-out property <bool> event-completed: false;
+    in-out property <bool> editor-visible: false;
+    in-out property <bool> auth-visible: false;
+    in-out property <bool> register-mode: false;
+    in-out property <bool> settings-visible: false;
+    in-out property <bool> close-choice-visible: false;
+    in-out property <bool> exit-pending: false;
+    in-out property <bool> sync-conflict-visible: false;
+    in-out property <string> sync-conflict-title;
+    in-out property <string> sync-conflict-local;
+    in-out property <string> sync-conflict-cloud;
+    in-out property <int> close-behavior: -1;
+    in-out property <int> settings-close-behavior: 0;
+    in-out property <bool> notifications-enabled: true;
+    in-out property <bool> notification-sound-enabled: true;
+    in-out property <bool> settings-notifications-enabled: true;
+    in-out property <bool> settings-notification-sound-enabled: true;
+    in-out property <string> auth-email;
+    in-out property <string> auth-password;
+    in-out property <string> auth-display-name;
+    in-out property <string> auth-code;
+    in-out property <string> auth-message;
+    in-out property <bool> signed-in: false;
+    in-out property <int> editor-picker: 0;
+
+    callback previous-month();
+    callback next-month();
+    callback go-today();
+    callback select-calendar-view(int);
+    callback select-day(string);
+    callback select-event(string);
+    callback new-event();
+    callback save-event();
+    callback delete-event();
+    callback show-account();
+    callback request-code();
+    callback submit-auth();
+    callback logout();
+    callback change-schedule-kind(int);
+    callback adjust-event-date(int, int);
+    callback adjust-event-time(int, int);
+    callback apply-event-time(string, string) -> bool;
+    callback adjust-lunar-date(int, int);
+    callback choose-close-action(int);
+    callback request-full-exit();
+    callback save-settings();
+    callback test-notification();
+    callback resolve-sync-conflict(bool);
+    callback start-window-drag();
+
+    VerticalLayout {
+        padding: 0px; spacing: 0px;
+        Rectangle {
+            height: 36px; background: Theme.island; border-width: 0px;
+            TouchArea {
+                x: 260px; width: parent.width - 430px; height: parent.height;
+                pointer-event(event) => {
+                    if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) { root.start-window-drag(); }
+                }
+            }
+            HorizontalLayout {
+                padding-left: 12px; padding-right: 5px; spacing: 8px;
+                Image { width: 24px; height: 24px; source: @image-url("../assets/schedule-logo-64.png"); image-fit: contain; }
+                Text { text: "Schedule Manager"; color: Theme.ink; font-size: 13px; font-weight: 800; vertical-alignment: center; }
+                Text { text: root.status; color: Theme.muted; font-size: 10px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; horizontal-alignment: center; }
+                WindowControl { symbol: "−"; clicked => { root.minimized = true; } }
+                WindowControl { symbol: root.maximized ? "❐" : "□"; clicked => { root.maximized = !root.maximized; } }
+                WindowControl {
+                    symbol: "×";
+                    close-action: true;
+                    clicked => {
+                        if root.close-behavior == 0 {
+                            root.minimized = true;
+                        } else if root.close-behavior == 1 {
+                            if !root.exit-pending { root.request-full-exit(); }
+                        } else {
+                            root.close-choice-visible = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            padding: 15px; spacing: 13px; vertical-stretch: 1;
+            Island {
+                width: 216px;
+                VerticalLayout {
+                    padding: 14px; spacing: 10px;
+                    SoftButton { label: "+  新建日程"; emphasized: true; clicked => { root.new-event(); } }
+                    Rectangle { height: 6px; }
+                    Text { text: "日历"; color: Theme.muted; font-size: 11px; font-weight: 700; }
+                    SoftButton { label: "今天"; emphasized: root.calendar-view == 0; clicked => { root.go-today(); } }
+                    SoftButton { label: "月视图"; emphasized: root.calendar-view == 1; clicked => { root.select-calendar-view(1); } }
+                    SoftButton { label: "全部日程"; emphasized: root.calendar-view == 2; clicked => { root.select-calendar-view(2); } }
+                    SoftButton { label: "已完成"; emphasized: root.calendar-view == 3; clicked => { root.select-calendar-view(3); } }
+                    Rectangle { vertical-stretch: 1; }
+                    SoftButton {
+                        label: "设置";
+                        clicked => {
+                            root.settings-close-behavior = root.close-behavior == -1 ? 0 : root.close-behavior;
+                            root.settings-notifications-enabled = root.notifications-enabled;
+                            root.settings-notification-sound-enabled = root.notification-sound-enabled;
+                            root.settings-visible = true;
+                        }
+                    }
+                    SoftButton { label: root.user-label; clicked => { root.show-account(); } }
+                }
+            }
+
+            Island {
+                horizontal-stretch: 1;
+                if root.calendar-view <= 1 : VerticalLayout {
+                    padding: 14px; spacing: 10px;
+                    HorizontalLayout {
+                        height: 38px; spacing: 8px;
+                        SoftButton { width: 38px; label: "‹"; clicked => { root.previous-month(); } }
+                        SoftButton { width: 38px; label: "›"; clicked => { root.next-month(); } }
+                        Text { text: root.month-title; color: Theme.ink; font-size: 20px; font-weight: 800; vertical-alignment: center; }
+                        Rectangle { horizontal-stretch: 1; }
+                        SoftButton { width: 68px; label: "今天"; clicked => { root.go-today(); } }
+                    }
+                    HorizontalLayout {
+                        height: 23px; spacing: 4px;
+                        for name in ["一", "二", "三", "四", "五", "六", "日"] : Text { text: name; color: Theme.muted; font-size: 11px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; horizontal-stretch: 1; }
+                    }
+                    VerticalLayout {
+                        spacing: 5px; vertical-stretch: 1;
+                        for week in root.calendar-weeks : WeekView {
+                            vertical-stretch: 1;
+                            week: week;
+                            selected(date) => { root.select-day(date); }
+                        }
+                    }
+                }
+                if root.calendar-view >= 2 : VerticalLayout {
+                    padding: 14px; spacing: 10px;
+                    HorizontalLayout {
+                        height: 38px;
+                        Text { text: root.overview-title; color: Theme.ink; font-size: 20px; font-weight: 800; vertical-alignment: center; horizontal-stretch: 1; }
+                        Text { text: root.overview-events.length + " 项"; color: Theme.muted; font-size: 11px; vertical-alignment: center; }
+                    }
+                    Rectangle { height: 1px; background: Theme.island-soft; }
+                    ScrollView {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            spacing: 5px;
+                            for row in root.overview-events : OverviewEventItem {
+                                event-data: row;
+                                selected: row.id == root.selected-event-id;
+                                clicked(id) => { root.select-event(id); }
+                            }
+                            Text { visible: root.overview-events.length == 0; height: 70px; text: root.overview-empty; color: Theme.muted; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                    }
+                }
+            }
+
+            Island {
+                width: 304px;
+                VerticalLayout {
+                    padding: 14px; spacing: 9px;
+                    HorizontalLayout {
+                        height: 31px;
+                        Text { text: root.editor-visible ? "编辑日程" : root.selected-date-title; color: Theme.ink; font-size: 16px; font-weight: 800; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                        SoftButton { visible: !root.editor-visible; width: 34px; label: "+"; clicked => { root.new-event(); } }
+                    }
+                    if !root.editor-visible : ScrollView {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            spacing: 6px;
+                            for row in root.selected-events : EventItem {
+                                event-data: row;
+                                selected: row.id == root.selected-event-id;
+                                clicked(id) => { root.select-event(id); }
+                            }
+                            Text { visible: root.selected-events.length == 0; text: "这一天还没有日程"; color: Theme.muted; font-size: 12px; horizontal-alignment: center; }
+                        }
+                    }
+                    if root.editor-visible : VerticalLayout {
+                        spacing: 7px; vertical-stretch: 1;
+                        VerticalLayout {
+                            height: 57px; spacing: 4px;
+                            Text { height: 15px; text: "标题"; color: Theme.muted; font-size: 10px; vertical-alignment: bottom; }
+                            Field { value <=> root.event-title; placeholder: "例如：项目复盘"; }
+                        }
+                        VerticalLayout {
+                            height: 57px; spacing: 4px;
+                            Text { height: 15px; text: "发生规则"; color: Theme.muted; font-size: 10px; vertical-alignment: bottom; }
+                            PickerField { value: root.event-schedule-label; hint: "选择  ›"; clicked => { root.editor-picker = 1; } }
+                        }
+                        if root.event-schedule-kind == 0 || root.event-schedule-kind == 3 : HorizontalLayout {
+                            height: 57px; spacing: 7px;
+                            VerticalLayout {
+                                spacing: 4px; horizontal-stretch: 1;
+                                Text { height: 15px; text: root.event-schedule-kind == 3 ? "每年公历日期" : "日期"; color: Theme.muted; font-size: 10px; vertical-alignment: bottom; }
+                                PickerField { value: root.event-date; hint: "日历  ›"; clicked => { root.editor-picker = 2; } }
+                            }
+                        }
+                        if root.event-schedule-kind == 4 : VerticalLayout {
+                            height: 57px; spacing: 4px;
+                            Text { height: 15px; text: "每年农历日期"; color: Theme.muted; font-size: 10px; vertical-alignment: bottom; }
+                            PickerField { value: root.event-lunar-date; hint: "农历  ›"; clicked => { root.editor-picker = 4; } }
+                        }
+                        if root.event-schedule-kind == 1 || root.event-schedule-kind == 2 : Rectangle {
+                            height: 38px; background: Theme.accent-soft; border-radius: 10px;
+                            Text {
+                                x: 10px; width: parent.width - 20px; height: parent.height;
+                                text: root.event-schedule-kind == 1 ? "周末与法定节假日触发；调休上班日不触发" : "普通工作日与调休上班日触发；法定休息日不触发";
+                                color: Theme.accent-deep; font-size: 9px; wrap: word-wrap; vertical-alignment: center;
+                            }
+                        }
+                        HorizontalLayout {
+                            height: 57px; spacing: 7px;
+                            VerticalLayout {
+                                spacing: 4px; horizontal-stretch: 1;
+                                Text { height: 15px; text: "开始时间"; color: Theme.muted; font-size: 10px; vertical-alignment: bottom; }
+                                PickerField { value: root.event-all-day ? "全天" : root.event-start-time; hint: "时钟  ›"; clicked => { if !root.event-all-day { root.editor-picker = 3; } } }
+                            }
+                            VerticalLayout {
+                                spacing: 4px; width: 105px;
+                                Text { height: 15px; text: "时长（分钟）"; color: Theme.muted; font-size: 10px; vertical-alignment: bottom; }
+                                NumberField { value <=> root.event-duration; placeholder: "60"; }
+                            }
+                        }
+                        VerticalLayout {
+                            height: 57px; spacing: 4px;
+                            Text { height: 15px; text: "地点"; color: Theme.muted; font-size: 10px; vertical-alignment: bottom; }
+                            Field { value <=> root.event-location; placeholder: "可选"; }
+                        }
+                        VerticalLayout {
+                            height: 80px; spacing: 4px;
+                            Text { height: 15px; text: "相对提醒"; color: Theme.muted; font-size: 10px; vertical-alignment: bottom; }
+                            HorizontalLayout {
+                                height: 30px; spacing: 5px;
+                                ChoiceChip { width: 58px; label: "准时"; checked <=> root.reminder-at-time; }
+                                ChoiceChip { width: 58px; label: "10分钟"; checked <=> root.reminder-10m; }
+                                ChoiceChip { width: 58px; label: "1小时"; checked <=> root.reminder-1h; }
+                                ChoiceChip { width: 58px; label: "前一天"; checked <=> root.reminder-1d; }
+                            }
+                            HorizontalLayout {
+                                height: 30px; spacing: 6px;
+                                Text { text: "自定义提前"; color: Theme.muted; font-size: 9px; vertical-alignment: center; }
+                                NumberField {
+                                    value <=> root.event-custom-reminder;
+                                    placeholder: "分钟";
+                                    horizontal-stretch: 1;
+                                    height: 30px;
+                                    edited => { root.reminder-custom-applied = false; }
+                                }
+                                SoftButton {
+                                    width: 58px;
+                                    height: 30px;
+                                    label: root.reminder-custom-applied ? "已应用" : "应用";
+                                    emphasized: root.reminder-custom-applied;
+                                    clicked => {
+                                        if root.event-custom-reminder != "" {
+                                            root.reminder-custom-applied = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        VerticalLayout {
+                            height: 90px; spacing: 4px;
+                            Text { height: 15px; text: "备注"; color: Theme.muted; font-size: 10px; vertical-alignment: bottom; }
+                            Rectangle {
+                                vertical-stretch: 1; background: Theme.island-soft; border-radius: 10px;
+                                TextInput { x: 10px; y: 8px; width: parent.width - 20px; height: parent.height - 16px; text <=> root.event-notes; color: Theme.ink; font-size: 12px; wrap: word-wrap; }
+                            }
+                        }
+                        HorizontalLayout {
+                            height: 30px; spacing: 8px;
+                            Toggle { visible: root.event-schedule-kind == 0 || root.event-schedule-kind == 3; width: 105px; label: "全天"; checked <=> root.event-all-day; }
+                            Toggle { horizontal-stretch: 1; label: "标记完成"; checked <=> root.event-completed; }
+                        }
+                        Rectangle { vertical-stretch: 1; }
+                        HorizontalLayout { height: 34px; spacing: 7px;
+                            SoftButton { visible: root.selected-event-id != ""; width: 58px; label: "删除"; danger: true; clicked => { root.delete-event(); } }
+                            Rectangle { horizontal-stretch: 1; }
+                            SoftButton { width: 58px; label: "取消"; clicked => { root.editor-visible = false; } }
+                            SoftButton { width: 72px; label: "保存"; emphasized: true; clicked => { root.save-event(); } }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.editor-picker != 0 : Rectangle {
+        background: #27232e66;
+        TouchArea { clicked => { root.editor-picker = 0; } }
+        if root.editor-picker == 1 : Island {
+            width: 470px; height: 406px;
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            TouchArea { }
+            VerticalLayout {
+                padding: 18px; spacing: 6px;
+                HorizontalLayout { height: 34px;
+                    Text { text: "选择日程发生规则"; color: Theme.ink; font-size: 18px; font-weight: 800; horizontal-stretch: 1; vertical-alignment: center; }
+                    SoftButton { width: 34px; label: "×"; clicked => { root.editor-picker = 0; } }
+                }
+                PickerOption { label: "具体日期与时间"; detail: "只在所选日期和时间发生一次"; selected: root.event-schedule-kind == 0; clicked => { root.change-schedule-kind(0); root.editor-picker = 0; } }
+                PickerOption { label: "每个法定休息日"; detail: "普通周末与法定节假日；自动排除调休上班日"; selected: root.event-schedule-kind == 1; clicked => { root.change-schedule-kind(1); root.editor-picker = 0; } }
+                PickerOption { label: "每个法定工作日"; detail: "周一至周五与调休上班日；自动排除法定休息日"; selected: root.event-schedule-kind == 2; clicked => { root.change-schedule-kind(2); root.editor-picker = 0; } }
+                PickerOption { label: "每年公历某一天"; detail: "例如每年 8 月 24 日"; selected: root.event-schedule-kind == 3; clicked => { root.change-schedule-kind(3); root.editor-picker = 0; } }
+                PickerOption { label: "每年农历某一天"; detail: "例如每年农历八月十五"; selected: root.event-schedule-kind == 4; clicked => { root.change-schedule-kind(4); root.editor-picker = 0; } }
+                PickerOption { label: "每天某个时刻"; detail: "从所选创建日期开始，每天在指定时刻发生"; selected: root.event-schedule-kind == 5; clicked => { root.change-schedule-kind(5); root.editor-picker = 0; } }
+            }
+        }
+        if root.editor-picker == 2 : Island {
+            width: 430px; height: 190px;
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            TouchArea { }
+            VerticalLayout {
+                padding: 18px; spacing: 12px;
+                HorizontalLayout { height: 34px;
+                    Text { text: root.event-schedule-kind == 3 ? "选择每年的公历日期" : "选择日期"; color: Theme.ink; font-size: 18px; font-weight: 800; horizontal-stretch: 1; vertical-alignment: center; }
+                    SoftButton { width: 34px; label: "×"; clicked => { root.editor-picker = 0; } }
+                }
+                HorizontalLayout { spacing: 8px;
+                    Stepper { visible: root.event-schedule-kind == 0; horizontal-stretch: 1; value: root.event-date-year; unit: "年"; decrease => { root.adjust-event-date(0, -1); } increase => { root.adjust-event-date(0, 1); } }
+                    Stepper { horizontal-stretch: 1; value: root.event-date-month; unit: "月"; decrease => { root.adjust-event-date(1, -1); } increase => { root.adjust-event-date(1, 1); } }
+                    Stepper { horizontal-stretch: 1; value: root.event-date-day; unit: "日"; decrease => { root.adjust-event-date(2, -1); } increase => { root.adjust-event-date(2, 1); } }
+                }
+                SoftButton { label: "确定"; emphasized: true; clicked => { root.editor-picker = 0; } }
+            }
+        }
+        if root.editor-picker == 3 : Island {
+            width: 340px; height: 190px;
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            TouchArea { }
+            VerticalLayout {
+                padding: 18px; spacing: 12px;
+                HorizontalLayout { height: 34px;
+                    Text { text: "选择时间"; color: Theme.ink; font-size: 18px; font-weight: 800; horizontal-stretch: 1; vertical-alignment: center; }
+                    SoftButton { width: 34px; label: "×"; clicked => { root.editor-picker = 0; } }
+                }
+                HorizontalLayout { spacing: 8px;
+                    TimeStepper { horizontal-stretch: 1; value <=> root.event-hour-input; unit: "时（0–23）"; decrease => { root.adjust-event-time(0, -1); } increase => { root.adjust-event-time(0, 1); } }
+                    TimeStepper { horizontal-stretch: 1; value <=> root.event-minute-input; unit: "分（0–59）"; decrease => { root.adjust-event-time(1, -1); } increase => { root.adjust-event-time(1, 1); } }
+                }
+                SoftButton {
+                    label: "确定";
+                    emphasized: true;
+                    clicked => {
+                        if root.apply-event-time(root.event-hour-input, root.event-minute-input) {
+                            root.editor-picker = 0;
+                        }
+                    }
+                }
+            }
+        }
+        if root.editor-picker == 4 : Island {
+            width: 390px; height: 234px;
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            TouchArea { }
+            VerticalLayout {
+                padding: 18px; spacing: 10px;
+                HorizontalLayout { height: 34px;
+                    Text { text: "选择每年的农历日期"; color: Theme.ink; font-size: 18px; font-weight: 800; horizontal-stretch: 1; vertical-alignment: center; }
+                    SoftButton { width: 34px; label: "×"; clicked => { root.editor-picker = 0; } }
+                }
+                HorizontalLayout { spacing: 8px;
+                    Stepper { horizontal-stretch: 1; value: root.event-lunar-month; unit: "农历月（1–12）"; decrease => { root.adjust-lunar-date(0, -1); } increase => { root.adjust-lunar-date(0, 1); } }
+                    Stepper { horizontal-stretch: 1; value: root.event-lunar-day; unit: "农历日（1–30）"; decrease => { root.adjust-lunar-date(1, -1); } increase => { root.adjust-lunar-date(1, 1); } }
+                }
+                Toggle { label: "闰月（仅在该年存在对应闰月时发生）"; checked <=> root.event-lunar-leap; toggled => { root.adjust-lunar-date(1, 0); } }
+                SoftButton { label: "确定"; emphasized: true; clicked => { root.editor-picker = 0; } }
+            }
+        }
+    }
+
+    if root.auth-visible : Rectangle {
+        background: #27232e66;
+        TouchArea { clicked => { } }
+        Island {
+            width: 390px; height: root.register-mode ? 470px : 355px;
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            VerticalLayout {
+                padding: 24px; spacing: 10px;
+                HorizontalLayout { height: 34px;
+                    Text { text: root.register-mode ? "创建同步账户" : "登录同步账户"; color: Theme.ink; font-size: 20px; font-weight: 800; horizontal-stretch: 1; }
+                    SoftButton { width: 34px; label: "×"; clicked => { root.auth-visible = false; } }
+                }
+                Text { text: "邮箱"; color: Theme.muted; font-size: 10px; }
+                Field { value <=> root.auth-email; placeholder: "name@example.com"; }
+                if root.register-mode : Text { text: "昵称"; color: Theme.muted; font-size: 10px; }
+                if root.register-mode : Field { value <=> root.auth-display-name; placeholder: "你的昵称"; }
+                Text { text: "密码"; color: Theme.muted; font-size: 10px; }
+                Field { value <=> root.auth-password; placeholder: "至少 8 位"; password: true; }
+                if root.register-mode : HorizontalLayout {
+                    spacing: 7px;
+                    Field { value <=> root.auth-code; placeholder: "6 位验证码"; horizontal-stretch: 1; }
+                    SoftButton { width: 108px; label: "获取验证码"; clicked => { root.request-code(); } }
+                }
+                Text { text: root.auth-message; color: Theme.danger; font-size: 11px; wrap: word-wrap; }
+                Rectangle { vertical-stretch: 1; }
+                SoftButton { label: root.register-mode ? "注册并开始同步" : "登录"; emphasized: true; clicked => { root.submit-auth(); } }
+                SoftButton { label: root.register-mode ? "已有账户，去登录" : "没有账户，去注册"; clicked => { root.register-mode = !root.register-mode; root.auth-message = ""; } }
+                SoftButton { visible: root.signed-in; label: "退出当前账户"; danger: true; clicked => { root.logout(); } }
+            }
+        }
+    }
+
+    if root.settings-visible : Rectangle {
+        background: #27232e66;
+        TouchArea { clicked => { } }
+        Island {
+            width: 430px; height: 430px;
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            TouchArea { }
+            VerticalLayout {
+                padding: 22px; spacing: 12px;
+                HorizontalLayout { height: 36px;
+                    Text { text: "设置"; color: Theme.ink; font-size: 20px; font-weight: 800; horizontal-stretch: 1; vertical-alignment: center; }
+                    SoftButton { width: 34px; label: "×"; clicked => { root.settings-visible = false; } }
+                }
+                Text { text: "关闭按钮行为"; color: Theme.ink; font-size: 12px; font-weight: 700; }
+                Text { text: "选择后会一直沿用，直到你在这里修改。"; color: Theme.muted; font-size: 10px; }
+                HorizontalLayout { height: 38px; spacing: 8px;
+                    SoftButton {
+                        horizontal-stretch: 1;
+                        label: "最小化到任务栏";
+                        emphasized: root.settings-close-behavior == 0;
+                        clicked => { root.settings-close-behavior = 0; }
+                    }
+                    SoftButton {
+                        horizontal-stretch: 1;
+                        label: "完全退出";
+                        emphasized: root.settings-close-behavior == 1;
+                        clicked => { root.settings-close-behavior = 1; }
+                    }
+                }
+                Rectangle { height: 1px; background: Theme.island-soft; }
+                Text { text: "提醒与通知"; color: Theme.ink; font-size: 12px; font-weight: 700; }
+                Toggle { label: "启用系统通知"; checked <=> root.settings-notifications-enabled; }
+                Toggle {
+                    label: "播放提醒音效";
+                    checked <=> root.settings-notification-sound-enabled;
+                    enabled: root.settings-notifications-enabled;
+                    opacity: root.settings-notifications-enabled ? 1 : 0.45;
+                }
+                SoftButton { label: "发送测试通知"; clicked => { root.test-notification(); } }
+                Text {
+                    text: "如果测试通知没有出现，请检查 Windows 的通知权限和勿扰模式。";
+                    color: Theme.muted; font-size: 10px; wrap: word-wrap;
+                }
+                Rectangle { vertical-stretch: 1; }
+                HorizontalLayout { height: 36px; spacing: 8px;
+                    Rectangle { horizontal-stretch: 1; }
+                    SoftButton { width: 72px; label: "取消"; clicked => { root.settings-visible = false; } }
+                    SoftButton { width: 92px; label: "保存设置"; emphasized: true; clicked => { root.save-settings(); } }
+                }
+            }
+        }
+    }
+
+    if root.sync-conflict-visible : Rectangle {
+        background: #27232e66;
+        TouchArea { clicked => { } }
+        Island {
+            width: 540px; height: 410px;
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            TouchArea { }
+            VerticalLayout {
+                padding: 22px; spacing: 12px;
+                Text { text: "本地与云端数据不一致"; color: Theme.ink; font-size: 20px; font-weight: 800; }
+                Text { text: root.sync-conflict-title; color: Theme.muted; font-size: 11px; overflow: elide; }
+                HorizontalLayout { vertical-stretch: 1; spacing: 12px;
+                    Rectangle {
+                        horizontal-stretch: 1; background: Theme.island-soft; border-radius: 12px;
+                        VerticalLayout { padding: 14px; spacing: 8px;
+                            Text { text: "本地数据"; color: Theme.ink; font-size: 13px; font-weight: 750; }
+                            Text { text: root.sync-conflict-local; color: Theme.muted; font-size: 11px; wrap: word-wrap; vertical-stretch: 1; }
+                            SoftButton { label: "采用本地"; emphasized: true; clicked => { root.resolve-sync-conflict(true); } }
+                        }
+                    }
+                    Rectangle {
+                        horizontal-stretch: 1; background: Theme.island-soft; border-radius: 12px;
+                        VerticalLayout { padding: 14px; spacing: 8px;
+                            Text { text: "云端数据"; color: Theme.ink; font-size: 13px; font-weight: 750; }
+                            Text { text: root.sync-conflict-cloud; color: Theme.muted; font-size: 11px; wrap: word-wrap; vertical-stretch: 1; }
+                            SoftButton { label: "采用云端"; clicked => { root.resolve-sync-conflict(false); } }
+                        }
+                    }
+                }
+                Text { text: "选择后会立即写入服务端与本地缓存，并继续处理下一项差异。"; color: Theme.muted; font-size: 10px; }
+            }
+        }
+    }
+
+    if root.close-choice-visible : Rectangle {
+        background: #27232e66;
+        TouchArea { clicked => { } }
+        Island {
+            width: 410px; height: 260px;
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            TouchArea { }
+            VerticalLayout {
+                padding: 24px; spacing: 12px;
+                Text { text: "关闭 Schedule Manager"; color: Theme.ink; font-size: 20px; font-weight: 800; }
+                Text {
+                    text: "这是第一次关闭。请选择右上角关闭按钮以后的行为；选择会保存，也可以随时在设置中更改。";
+                    color: Theme.muted; font-size: 11px; wrap: word-wrap;
+                }
+                Rectangle { vertical-stretch: 1; }
+                SoftButton {
+                    label: "最小化到任务栏并继续提醒";
+                    emphasized: true;
+                    clicked => {
+                        root.choose-close-action(0);
+                        root.close-choice-visible = false;
+                        root.minimized = true;
+                    }
+                }
+                SoftButton {
+                    label: "完全退出程序";
+                    danger: true;
+                    clicked => {
+                        root.choose-close-action(1);
+                        root.close-choice-visible = false;
+                        if !root.exit-pending { root.request-full-exit(); }
+                    }
+                }
+            }
+        }
+    }
+}

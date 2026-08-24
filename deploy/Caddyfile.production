@@ -1,0 +1,23 @@
+novel.emssion.com {
+    encode zstd gzip
+
+    tls {
+        key_type rsa2048
+    }
+
+    header {
+        -Server
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "geolocation=(), microphone=(), camera=()"
+    }
+
+    handle_path /schedule/* {
+        reverse_proxy 127.0.0.1:8010
+    }
+
+    handle {
+        reverse_proxy 127.0.0.1:8000
+    }
+}

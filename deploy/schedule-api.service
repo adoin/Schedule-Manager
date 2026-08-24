@@ -1,0 +1,21 @@
+[Unit]
+Description=Schedule Manager Rust sync API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=schedule-manager
+Group=schedule-manager
+WorkingDirectory=/srv/schedule-manager
+EnvironmentFile=/etc/schedule-manager/api.env
+ExecStart=/srv/schedule-manager/bin/schedule-api
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/schedule-manager
+
+[Install]
+WantedBy=multi-user.target
