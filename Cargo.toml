@@ -1,6 +1,6 @@
 [package]
 name = "schedule-manager"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 description = "Cross-platform Chinese calendar and schedule manager"
 license = "MIT"
@@ -30,8 +30,10 @@ default-features = false
 features = ["backend-winit", "renderer-femtovg", "compat-1-2", "std", "unstable-winit-030"]
 
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
 keyring = { version = "4.1", optional = true }
 notify-rust = { version = "4.12", optional = true, default-features = false }
+tray-icon = { version = "0.24", default-features = false }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }

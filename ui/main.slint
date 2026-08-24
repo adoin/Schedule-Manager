@@ -471,6 +471,7 @@ export component AppWindow inherits Window {
     callback apply-event-time(string, string) -> bool;
     callback adjust-lunar-date(int, int);
     callback choose-close-action(int);
+    callback request-hide-to-tray();
     callback request-full-exit();
     callback save-settings();
     callback test-notification();
@@ -502,6 +503,8 @@ export component AppWindow inherits Window {
                             root.minimized = true;
                         } else if root.close-behavior == 1 {
                             if !root.exit-pending { root.request-full-exit(); }
+                        } else if root.close-behavior == 2 {
+                            root.request-hide-to-tray();
                         } else {
                             root.close-choice-visible = true;
                         }
@@ -856,11 +859,18 @@ export component AppWindow inherits Window {
                     }
                     SoftButton {
                         horizontal-stretch: 1;
+                        label: "隐藏到托盘";
+                        emphasized: root.settings-close-behavior == 2;
+                        clicked => { root.settings-close-behavior = 2; }
+                    }
+                    SoftButton {
+                        horizontal-stretch: 1;
                         label: "完全退出";
                         emphasized: root.settings-close-behavior == 1;
                         clicked => { root.settings-close-behavior = 1; }
                     }
                 }
+                Text { text: "托盘右键可以随时打开主界面或同步并退出，双击托盘可恢复窗口。"; color: Theme.muted; font-size: 10px; wrap: word-wrap; }
                 Rectangle { height: 1px; background: Theme.island-soft; }
                 Text { text: "提醒与通知"; color: Theme.ink; font-size: 12px; font-weight: 700; }
                 Toggle { label: "启用系统通知"; checked <=> root.settings-notifications-enabled; }
@@ -923,7 +933,7 @@ export component AppWindow inherits Window {
         background: #27232e66;
         TouchArea { clicked => { } }
         Island {
-            width: 410px; height: 260px;
+            width: 430px; height: 320px;
             x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
             TouchArea { }
             VerticalLayout {
@@ -936,11 +946,19 @@ export component AppWindow inherits Window {
                 Rectangle { vertical-stretch: 1; }
                 SoftButton {
                     label: "最小化到任务栏并继续提醒";
-                    emphasized: true;
                     clicked => {
                         root.choose-close-action(0);
                         root.close-choice-visible = false;
                         root.minimized = true;
+                    }
+                }
+                SoftButton {
+                    label: "隐藏界面到系统托盘并继续提醒";
+                    emphasized: true;
+                    clicked => {
+                        root.choose-close-action(2);
+                        root.close-choice-visible = false;
+                        root.request-hide-to-tray();
                     }
                 }
                 SoftButton {

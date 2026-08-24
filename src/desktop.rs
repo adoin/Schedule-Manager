@@ -12,6 +12,8 @@ use anyhow::{Context, Result, anyhow};
 use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime, TimeZone, Timelike, Utc, Weekday};
 use chrono_tz::Asia::Shanghai;
 use slint::{Color, ComponentHandle, ModelRc, Timer, TimerMode, VecModel};
+#[cfg(target_os = "macos")]
+use std::{cell::RefCell, rc::Rc, time::Instant};
 use std::{
     collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
@@ -50,7 +52,7 @@ pub fn run() -> Result<()> {
     let close_behavior = repository
         .setting("close_behavior")?
         .and_then(|value| value.parse::<i32>().ok())
-        .filter(|value| matches!(value, 0 | 1))
+        .filter(|value| matches!(value, 0 | 1 | 2))
         .unwrap_or(-1);
     let notifications_enabled = bool_setting(&repository, "notifications_enabled", true);
     let notification_sound_enabled = bool_setting(&repository, "notification_sound_enabled", true);
@@ -77,6 +79,15 @@ pub fn run() -> Result<()> {
         app.set_status(format!("Windows 通知身份注册失败，将使用兼容模式：{error}").into());
     }
     wire_callbacks(&app, state.clone());
+    let _system_tray = match install_system_tray(&app) {
+        Ok(tray) => Some(tray),
+        Err(error) => {
+            eprintln!("system tray startup failed: {error:#}");
+            app.set_close_behavior(-1);
+            app.set_status(format!("系统托盘启动失败，请关闭时选择完全退出：{error}").into());
+            None
+        }
+    };
     start_reminder_timer(&app);
     start_sync_timer(&app, state.clone());
     refresh_holidays_in_background(&app, state.clone());
@@ -96,7 +107,7 @@ fn wire_callbacks(app: &AppWindow, state: Arc<Mutex<UiState>>) {
     let weak = app.as_weak();
     app.on_choose_close_action(move |behavior| {
         let Some(app) = weak.upgrade() else { return };
-        if !matches!(behavior, 0 | 1) {
+        if !matches!(behavior, 0 | 1 | 2) {
             return;
         }
         match LocalRepository::open()
@@ -104,6 +115,13 @@ fn wire_callbacks(app: &AppWindow, state: Arc<Mutex<UiState>>) {
         {
             Ok(()) => app.set_close_behavior(behavior),
             Err(error) => app.set_status(format!("保存关闭行为失败：{error}").into()),
+        }
+    });
+
+    let weak = app.as_weak();
+    app.on_request_hide_to_tray(move || {
+        if let Some(app) = weak.upgrade() {
+            hide_main_window(&app);
         }
     });
 
@@ -135,7 +153,7 @@ fn wire_callbacks(app: &AppWindow, state: Arc<Mutex<UiState>>) {
     let weak = app.as_weak();
     app.on_save_settings(move || {
         let Some(app) = weak.upgrade() else { return };
-        let close_behavior = app.get_settings_close_behavior().clamp(0, 1);
+        let close_behavior = app.get_settings_close_behavior().clamp(0, 2);
         let notifications_enabled = app.get_settings_notifications_enabled();
         let notification_sound_enabled = app.get_settings_notification_sound_enabled();
         let result = (|| -> Result<()> {
@@ -1499,6 +1517,119 @@ fn parse_color(value: &str) -> Color {
         }
     }
     Color::from_rgb_u8(104, 120, 214)
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+struct SystemTray {
+    _icon: tray_icon::TrayIcon,
+    _event_timer: Timer,
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn install_system_tray(app: &AppWindow) -> Result<SystemTray> {
+    use tray_icon::{
+        MouseButton, TrayIconBuilder, TrayIconEvent,
+        menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
+    };
+
+    let decoded =
+        image::load_from_memory(include_bytes!("../assets/schedule-logo-64.png"))?.into_rgba8();
+    let (width, height) = decoded.dimensions();
+    let icon = tray_icon::Icon::from_rgba(decoded.into_raw(), width, height)
+        .map_err(|error| anyhow!("托盘图标无效：{error}"))?;
+
+    let open_item = MenuItem::new("打开主界面", true, None);
+    let hide_item = MenuItem::new("隐藏到托盘", true, None);
+    let separator = PredefinedMenuItem::separator();
+    let exit_item = MenuItem::new("同步并退出", true, None);
+    let open_id = open_item.id().clone();
+    let hide_id = hide_item.id().clone();
+    let exit_id = exit_item.id().clone();
+    let menu = Menu::new();
+    menu.append_items(&[&open_item, &hide_item, &separator, &exit_item])?;
+
+    let tray = TrayIconBuilder::new()
+        .with_menu(Box::new(menu))
+        .with_menu_on_left_click(false)
+        .with_menu_on_right_click(true)
+        .with_tooltip("Schedule Manager · 双击打开")
+        .with_icon(icon)
+        .build()?;
+
+    let weak = app.as_weak();
+    #[cfg(target_os = "macos")]
+    let last_left_release = Rc::new(RefCell::new(None::<Instant>));
+    let event_timer = Timer::default();
+    event_timer.start(
+        TimerMode::Repeated,
+        StdDuration::from_millis(100),
+        move || {
+            let Some(app) = weak.upgrade() else { return };
+            while let Ok(event) = MenuEvent::receiver().try_recv() {
+                if event.id == open_id {
+                    show_main_window(&app);
+                } else if event.id == hide_id {
+                    hide_main_window(&app);
+                } else if event.id == exit_id && !app.get_exit_pending() {
+                    app.invoke_request_full_exit();
+                }
+            }
+            while let Ok(event) = TrayIconEvent::receiver().try_recv() {
+                match event {
+                    TrayIconEvent::DoubleClick {
+                        button: MouseButton::Left,
+                        ..
+                    } => show_main_window(&app),
+                    #[cfg(target_os = "macos")]
+                    TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: tray_icon::MouseButtonState::Up,
+                        ..
+                    } => {
+                        let now = Instant::now();
+                        let mut previous = last_left_release.borrow_mut();
+                        if previous
+                            .is_some_and(|value| now.duration_since(value).as_millis() <= 500)
+                        {
+                            *previous = None;
+                            show_main_window(&app);
+                        } else {
+                            *previous = Some(now);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        },
+    );
+
+    Ok(SystemTray {
+        _icon: tray,
+        _event_timer: event_timer,
+    })
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn install_system_tray(_app: &AppWindow) -> Result<()> {
+    Ok(())
+}
+
+fn hide_main_window(app: &AppWindow) {
+    app.set_status("已隐藏到系统托盘，双击托盘图标可恢复".into());
+    let _ = app.hide();
+}
+
+fn show_main_window(app: &AppWindow) {
+    let _ = app.show();
+    app.set_status("主界面已从系统托盘恢复".into());
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    {
+        use slint::winit_030::WinitWindowAccessor;
+        let _ = app.window().with_winit_window(|window| {
+            window.set_minimized(false);
+            window.focus_window();
+        });
+    }
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
