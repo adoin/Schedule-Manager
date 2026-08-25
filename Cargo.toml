@@ -1,6 +1,6 @@
 [package]
 name = "schedule-manager"
-version = "1.0.2"
+version = "1.0.3"
 edition = "2024"
 description = "Cross-platform Chinese calendar and schedule manager"
 license = "MIT"
@@ -34,6 +34,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 keyring = { version = "4.1", optional = true }
 notify-rust = { version = "4.12", optional = true, default-features = false }
 tray-icon = { version = "0.24", default-features = false }
+window-vibrancy = "0.8"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }

@@ -4,7 +4,7 @@ set -euo pipefail
 project_root="$(cd "$(dirname "$0")/.." && pwd)"
 app_dir="$project_root/dist/Schedule Manager.app"
 contents_dir="$app_dir/Contents"
-app_version="${APP_VERSION:-1.0.2}"
+app_version="${APP_VERSION:-1.0.3}"
 
 cd "$project_root"
 cargo build --release --locked --bin schedule-manager

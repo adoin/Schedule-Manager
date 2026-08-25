@@ -11,6 +11,7 @@ use crate::{
 use anyhow::{Context, Result, anyhow};
 use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime, TimeZone, Timelike, Utc, Weekday};
 use chrono_tz::Asia::Shanghai;
+use serde::{Deserialize, Serialize};
 use slint::{Color, ComponentHandle, ModelRc, Timer, TimerMode, VecModel};
 #[cfg(target_os = "windows")]
 use std::process::{Command, Output};
@@ -19,13 +20,12 @@ use std::{cell::RefCell, rc::Rc, time::Instant};
 use std::{
     collections::{HashMap, VecDeque},
     ffi::OsStr,
+    fs,
+    path::PathBuf,
     sync::{Arc, Mutex},
     thread,
     time::Duration as StdDuration,
 };
-#[cfg(target_os = "macos")]
-use std::{fs, path::PathBuf};
-
 slint::include_modules!();
 
 struct UiState {
@@ -36,6 +36,7 @@ struct UiState {
     token: Option<String>,
     email: Option<String>,
     sync_conflicts: VecDeque<SyncConflict>,
+    widget_preview_event_id: Option<String>,
     pending_sync_cursor: Option<i64>,
     sync_in_progress: bool,
 }
@@ -44,6 +45,23 @@ struct UiState {
 struct SyncConflict {
     local: CalendarEvent,
     remote: Option<CalendarEvent>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct DesktopWidgetConfig {
+    x: Option<i32>,
+    y: Option<i32>,
+    locked: bool,
+}
+
+impl Default for DesktopWidgetConfig {
+    fn default() -> Self {
+        Self {
+            x: None,
+            y: None,
+            locked: true,
+        }
+    }
 }
 
 pub fn run() -> Result<()> {
@@ -55,10 +73,13 @@ pub fn run() -> Result<()> {
     let email = repository.setting("account_email")?;
     let token = email.as_deref().and_then(load_token);
     let app = AppWindow::new()?;
+    let widget = DesktopWidget::new()?;
+    let widget_config = load_desktop_widget_config().unwrap_or_default();
+    widget.set_locked(widget_config.locked);
     let close_behavior = repository
         .setting("close_behavior")?
         .and_then(|value| value.parse::<i32>().ok())
-        .filter(|value| matches!(value, 0 | 1 | 2))
+        .filter(|value| (0..=3).contains(value))
         .unwrap_or(-1);
     let notifications_enabled = bool_setting(&repository, "notifications_enabled", true);
     let notification_sound_enabled = bool_setting(&repository, "notification_sound_enabled", true);
@@ -83,16 +104,20 @@ pub fn run() -> Result<()> {
         token,
         email,
         sync_conflicts: VecDeque::new(),
+        widget_preview_event_id: None,
         pending_sync_cursor: None,
         sync_in_progress: false,
     }));
-    render_all(&app, &state)?;
+    render_all_surfaces(&app, &widget, &state)?;
     #[cfg(target_os = "windows")]
     if let Some(error) = notification_identity_error {
         app.set_status(format!("Windows 通知身份注册失败，将使用兼容模式：{error}").into());
     }
-    wire_callbacks(&app, state.clone());
-    let _system_tray = match install_system_tray(&app) {
+    wire_callbacks(&app, &widget, state.clone());
+    wire_desktop_widget_callbacks(&app, &widget, state.clone());
+    let _widget_position_timer = start_desktop_widget_position_timer(&widget);
+    let _widget_refresh_timer = start_desktop_widget_refresh_timer(&app, &widget, state.clone());
+    let _system_tray = match install_system_tray(&app, &widget, state.clone()) {
         Ok(tray) => Some(tray),
         Err(error) => {
             eprintln!("system tray startup failed: {error:#}");
@@ -121,11 +146,11 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-fn wire_callbacks(app: &AppWindow, state: Arc<Mutex<UiState>>) {
+fn wire_callbacks(app: &AppWindow, widget: &DesktopWidget, state: Arc<Mutex<UiState>>) {
     let weak = app.as_weak();
     app.on_choose_close_action(move |behavior| {
         let Some(app) = weak.upgrade() else { return };
-        if !matches!(behavior, 0 | 1 | 2) {
+        if !(0..=3).contains(&behavior) {
             return;
         }
         match LocalRepository::open()
@@ -137,9 +162,22 @@ fn wire_callbacks(app: &AppWindow, state: Arc<Mutex<UiState>>) {
     });
 
     let weak = app.as_weak();
+    let weak_widget = widget.as_weak();
     app.on_request_hide_to_tray(move || {
         if let Some(app) = weak.upgrade() {
-            hide_main_window(&app);
+            hide_main_window(&app, weak_widget.upgrade().as_ref());
+        }
+    });
+
+    let weak_app = app.as_weak();
+    let weak_widget = widget.as_weak();
+    let shared = state.clone();
+    app.on_request_dock_to_desktop(move || {
+        let (Some(app), Some(widget)) = (weak_app.upgrade(), weak_widget.upgrade()) else {
+            return;
+        };
+        if let Err(error) = dock_to_desktop(&app, &widget, &shared) {
+            app.set_status(format!("吸附到桌面失败：{error}").into());
         }
     });
 
@@ -171,7 +209,7 @@ fn wire_callbacks(app: &AppWindow, state: Arc<Mutex<UiState>>) {
     let weak = app.as_weak();
     app.on_save_settings(move || {
         let Some(app) = weak.upgrade() else { return };
-        let close_behavior = app.get_settings_close_behavior().clamp(0, 2);
+        let close_behavior = app.get_settings_close_behavior().clamp(0, 3);
         let notifications_enabled = app.get_settings_notifications_enabled();
         let notification_sound_enabled = app.get_settings_notification_sound_enabled();
         let autostart_enabled = app.get_settings_autostart_enabled();
@@ -731,6 +769,212 @@ fn wire_callbacks(app: &AppWindow, state: Arc<Mutex<UiState>>) {
             begin_system_window_drag(&app);
         }
     });
+}
+
+fn wire_desktop_widget_callbacks(
+    app: &AppWindow,
+    widget: &DesktopWidget,
+    state: Arc<Mutex<UiState>>,
+) {
+    let weak_app = app.as_weak();
+    let weak_widget = widget.as_weak();
+    let shared = state.clone();
+    widget.on_previous_month(move || {
+        if let Ok(mut state) = shared.lock() {
+            state.visible_month = shift_month(state.visible_month, -1);
+            state.widget_preview_event_id = None;
+        }
+        if let (Some(app), Some(widget)) = (weak_app.upgrade(), weak_widget.upgrade()) {
+            let _ = render_all_surfaces(&app, &widget, &shared);
+        }
+    });
+
+    let weak_app = app.as_weak();
+    let weak_widget = widget.as_weak();
+    let shared = state.clone();
+    widget.on_next_month(move || {
+        if let Ok(mut state) = shared.lock() {
+            state.visible_month = shift_month(state.visible_month, 1);
+            state.widget_preview_event_id = None;
+        }
+        if let (Some(app), Some(widget)) = (weak_app.upgrade(), weak_widget.upgrade()) {
+            let _ = render_all_surfaces(&app, &widget, &shared);
+        }
+    });
+
+    let weak_app = app.as_weak();
+    let weak_widget = widget.as_weak();
+    let shared = state.clone();
+    widget.on_go_today(move || {
+        let today = Local::now().date_naive();
+        if let Ok(mut state) = shared.lock() {
+            state.visible_month = today.with_day(1).unwrap();
+            state.selected_date = today;
+            state.widget_preview_event_id = None;
+        }
+        if let (Some(app), Some(widget)) = (weak_app.upgrade(), weak_widget.upgrade()) {
+            let _ = render_all_surfaces(&app, &widget, &shared);
+        }
+    });
+
+    let weak_app = app.as_weak();
+    let weak_widget = widget.as_weak();
+    let shared = state.clone();
+    widget.on_select_day(move |value| {
+        if let Ok(date) = NaiveDate::parse_from_str(&value, "%Y-%m-%d")
+            && let Ok(mut state) = shared.lock()
+        {
+            state.selected_date = date;
+            state.widget_preview_event_id = None;
+            if date.month() != state.visible_month.month()
+                || date.year() != state.visible_month.year()
+            {
+                state.visible_month = date.with_day(1).unwrap();
+            }
+        }
+        if let (Some(app), Some(widget)) = (weak_app.upgrade(), weak_widget.upgrade()) {
+            let _ = render_all_surfaces(&app, &widget, &shared);
+        }
+    });
+
+    let weak_app = app.as_weak();
+    let weak_widget = widget.as_weak();
+    let shared = state.clone();
+    widget.on_preview_event(move |id| {
+        if let Ok(mut state) = shared.lock() {
+            state.widget_preview_event_id = Some(id.to_string());
+        }
+        if let (Some(app), Some(widget)) = (weak_app.upgrade(), weak_widget.upgrade()) {
+            let _ = render_all_surfaces(&app, &widget, &shared);
+        }
+    });
+
+    let weak_app = app.as_weak();
+    let weak_widget = widget.as_weak();
+    let shared = state.clone();
+    widget.on_edit_event(move |id| {
+        let (Some(app), Some(widget)) = (weak_app.upgrade(), weak_widget.upgrade()) else {
+            return;
+        };
+        if let Ok(mut state) = shared.lock() {
+            state.selected_event_id = Some(id.to_string());
+        }
+        match load_event_into_editor(&app, &id) {
+            Ok(()) => {
+                app.set_editor_visible(true);
+                show_main_window(&app, Some(&widget));
+            }
+            Err(error) => app.set_status(format!("读取日程失败：{error}").into()),
+        }
+    });
+
+    let weak_widget = widget.as_weak();
+    widget.on_set_locked(move |locked| {
+        let Some(widget) = weak_widget.upgrade() else {
+            return;
+        };
+        widget.set_locked(locked);
+        let mut config = load_desktop_widget_config().unwrap_or_default();
+        config.locked = locked;
+        if let Some((x, y)) = desktop_widget_position(&widget) {
+            config.x = Some(x);
+            config.y = Some(y);
+        }
+        let _ = save_desktop_widget_config(&config);
+    });
+
+    let weak_widget = widget.as_weak();
+    widget.on_start_drag(move || {
+        if let Some(widget) = weak_widget.upgrade()
+            && !widget.get_locked()
+        {
+            begin_desktop_widget_drag(&widget);
+        }
+    });
+
+    let weak_app = app.as_weak();
+    let weak_widget = widget.as_weak();
+    widget.on_open_main(move || {
+        if let (Some(app), Some(widget)) = (weak_app.upgrade(), weak_widget.upgrade()) {
+            show_main_window(&app, Some(&widget));
+        }
+    });
+
+    let weak_app = app.as_weak();
+    let weak_widget = widget.as_weak();
+    widget.on_hide_widget(move || {
+        if let Some(widget) = weak_widget.upgrade() {
+            let _ = widget.hide();
+        }
+        if let Some(app) = weak_app.upgrade() {
+            app.set_status("桌面日历已隐藏到系统托盘".into());
+        }
+    });
+}
+
+fn render_all_surfaces(
+    app: &AppWindow,
+    widget: &DesktopWidget,
+    state: &Arc<Mutex<UiState>>,
+) -> Result<()> {
+    render_all(app, state)?;
+    render_desktop_widget(app, widget, state)
+}
+
+fn render_desktop_widget(
+    app: &AppWindow,
+    widget: &DesktopWidget,
+    state: &Arc<Mutex<UiState>>,
+) -> Result<()> {
+    widget.set_calendar_weeks(app.get_calendar_weeks());
+    widget.set_selected_events(app.get_selected_events());
+    widget.set_month_title(app.get_month_title());
+    widget.set_selected_date_title(app.get_selected_date_title());
+
+    let preview_id = state
+        .lock()
+        .map_err(|_| anyhow!("UI state unavailable"))?
+        .widget_preview_event_id
+        .clone();
+    let Some(preview_id) = preview_id else {
+        clear_desktop_widget_preview(widget);
+        return Ok(());
+    };
+    let Some(event) = LocalRepository::open()?.event(&preview_id)? else {
+        clear_desktop_widget_preview(widget);
+        return Ok(());
+    };
+    let start = event.start_at.with_timezone(&Shanghai);
+    let time = if event.all_day {
+        "全天".to_owned()
+    } else {
+        start.format("%H:%M").to_string()
+    };
+    let detail = [
+        event.location.trim(),
+        event.notes.trim(),
+        reminder_summary(&event.reminder_minutes).as_str(),
+    ]
+    .into_iter()
+    .filter(|value| !value.is_empty())
+    .collect::<Vec<_>>()
+    .join(" · ");
+    widget.set_preview_event_id(preview_id.into());
+    widget.set_preview_title(event.title.into());
+    widget.set_preview_time(time.into());
+    widget.set_preview_detail(if detail.is_empty() {
+        "没有额外备注".into()
+    } else {
+        detail.into()
+    });
+    Ok(())
+}
+
+fn clear_desktop_widget_preview(widget: &DesktopWidget) {
+    widget.set_preview_event_id("".into());
+    widget.set_preview_title("点击日程查看详情".into());
+    widget.set_preview_time("".into());
+    widget.set_preview_detail("".into());
 }
 
 fn render_all(app: &AppWindow, state: &Arc<Mutex<UiState>>) -> Result<()> {
@@ -1693,6 +1937,180 @@ fn configure_autostart(enabled: bool) -> Result<()> {
     }
 }
 
+fn desktop_widget_config_path() -> Result<PathBuf> {
+    let directories = directories::ProjectDirs::from("com", "Emssion", "ScheduleManager")
+        .ok_or_else(|| anyhow!("无法定位本地配置目录"))?;
+    Ok(directories.config_dir().join("desktop-widget.json"))
+}
+
+fn load_desktop_widget_config() -> Result<DesktopWidgetConfig> {
+    let path = desktop_widget_config_path()?;
+    if !path.exists() {
+        return Ok(DesktopWidgetConfig::default());
+    }
+    let payload = fs::read_to_string(&path)
+        .with_context(|| format!("无法读取桌面挂件配置：{}", path.display()))?;
+    serde_json::from_str(&payload)
+        .with_context(|| format!("桌面挂件配置格式无效：{}", path.display()))
+}
+
+fn save_desktop_widget_config(config: &DesktopWidgetConfig) -> Result<()> {
+    let path = desktop_widget_config_path()?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("桌面挂件配置目录无效"))?;
+    fs::create_dir_all(parent).context("无法创建桌面挂件配置目录")?;
+    let payload = serde_json::to_string_pretty(config)?;
+    fs::write(&path, payload).with_context(|| format!("无法保存桌面挂件配置：{}", path.display()))
+}
+
+fn dock_to_desktop(
+    app: &AppWindow,
+    widget: &DesktopWidget,
+    state: &Arc<Mutex<UiState>>,
+) -> Result<()> {
+    render_all_surfaces(app, widget, state)?;
+    widget.show()?;
+    configure_desktop_widget_window(widget);
+    app.set_status("日历已吸附到桌面；可从托盘恢复主程序".into());
+    app.hide()?;
+    Ok(())
+}
+
+fn configure_desktop_widget_window(widget: &DesktopWidget) {
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    {
+        use slint::winit_030::{WinitWindowAccessor, winit::window::WindowLevel};
+
+        let config = load_desktop_widget_config().unwrap_or_default();
+        let _ = widget.window().with_winit_window(|window| {
+            window.set_window_level(WindowLevel::AlwaysOnBottom);
+            #[cfg(target_os = "windows")]
+            {
+                use slint::winit_030::winit::platform::windows::WindowExtWindows;
+                window.set_skip_taskbar(true);
+                if let Err(error) =
+                    window_vibrancy::apply_acrylic(window, Some((247, 244, 240, 190)))
+                {
+                    eprintln!("desktop widget acrylic failed: {error}");
+                }
+            }
+            #[cfg(target_os = "macos")]
+            if let Err(error) = window_vibrancy::apply_vibrancy(
+                window,
+                window_vibrancy::NSVisualEffectMaterial::HudWindow,
+                None,
+                Some(24.0),
+            ) {
+                eprintln!("desktop widget vibrancy failed: {error}");
+            }
+
+            let saved_position = config.x.zip(config.y).filter(|(x, y)| {
+                window.available_monitors().any(|monitor| {
+                    let position = monitor.position();
+                    let size = monitor.size();
+                    *x + 80 > position.x
+                        && *y + 80 > position.y
+                        && *x < position.x + size.width as i32
+                        && *y < position.y + size.height as i32
+                })
+            });
+            if let Some((x, y)) = saved_position {
+                window
+                    .set_outer_position(slint::winit_030::winit::dpi::PhysicalPosition::new(x, y));
+            } else if let Some(monitor) = window.current_monitor() {
+                let monitor_position = monitor.position();
+                let monitor_size = monitor.size();
+                let window_size = window.outer_size();
+                let x =
+                    monitor_position.x + monitor_size.width as i32 - window_size.width as i32 - 28;
+                let y = monitor_position.y + 44;
+                window
+                    .set_outer_position(slint::winit_030::winit::dpi::PhysicalPosition::new(x, y));
+            }
+        });
+    }
+}
+
+fn desktop_widget_position(widget: &DesktopWidget) -> Option<(i32, i32)> {
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    {
+        use slint::winit_030::WinitWindowAccessor;
+        widget
+            .window()
+            .with_winit_window(|window| {
+                window.outer_position().ok().map(|value| (value.x, value.y))
+            })
+            .flatten()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    None
+}
+
+fn start_desktop_widget_position_timer(widget: &DesktopWidget) -> Timer {
+    let weak = widget.as_weak();
+    let last_position = Arc::new(Mutex::new(None::<(i32, i32)>));
+    let timer = Timer::default();
+    timer.start(
+        TimerMode::Repeated,
+        StdDuration::from_millis(500),
+        move || {
+            let Some(widget) = weak.upgrade() else { return };
+            if !widget.window().is_visible() || widget.get_locked() {
+                return;
+            }
+            let Some(position) = desktop_widget_position(&widget) else {
+                return;
+            };
+            let Ok(mut previous) = last_position.lock() else {
+                return;
+            };
+            if previous.as_ref() == Some(&position) {
+                return;
+            }
+            *previous = Some(position);
+            let mut config = load_desktop_widget_config().unwrap_or_default();
+            config.x = Some(position.0);
+            config.y = Some(position.1);
+            config.locked = widget.get_locked();
+            if let Err(error) = save_desktop_widget_config(&config) {
+                eprintln!("desktop widget position save failed: {error:#}");
+            }
+        },
+    );
+    timer
+}
+
+fn start_desktop_widget_refresh_timer(
+    app: &AppWindow,
+    widget: &DesktopWidget,
+    state: Arc<Mutex<UiState>>,
+) -> Timer {
+    let weak_app = app.as_weak();
+    let weak_widget = widget.as_weak();
+    let timer = Timer::default();
+    timer.start(TimerMode::Repeated, StdDuration::from_secs(30), move || {
+        let (Some(app), Some(widget)) = (weak_app.upgrade(), weak_widget.upgrade()) else {
+            return;
+        };
+        if widget.window().is_visible() {
+            let _ = render_all_surfaces(&app, &widget, &state);
+        }
+    });
+    timer
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn begin_desktop_widget_drag(widget: &DesktopWidget) {
+    use slint::winit_030::WinitWindowAccessor;
+    let _ = widget
+        .window()
+        .with_winit_window(|window| window.drag_window());
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn begin_desktop_widget_drag(_widget: &DesktopWidget) {}
+
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 struct SystemTray {
     _icon: tray_icon::TrayIcon,
@@ -1700,7 +2118,11 @@ struct SystemTray {
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-fn install_system_tray(app: &AppWindow) -> Result<SystemTray> {
+fn install_system_tray(
+    app: &AppWindow,
+    widget: &DesktopWidget,
+    state: Arc<Mutex<UiState>>,
+) -> Result<SystemTray> {
     use tray_icon::{
         MouseButton, TrayIconBuilder, TrayIconEvent,
         menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
@@ -1713,14 +2135,22 @@ fn install_system_tray(app: &AppWindow) -> Result<SystemTray> {
         .map_err(|error| anyhow!("托盘图标无效：{error}"))?;
 
     let open_item = MenuItem::new("打开主界面", true, None);
+    let desktop_item = MenuItem::new("吸附到桌面", true, None);
     let hide_item = MenuItem::new("隐藏到托盘", true, None);
     let separator = PredefinedMenuItem::separator();
     let exit_item = MenuItem::new("同步并退出", true, None);
     let open_id = open_item.id().clone();
+    let desktop_id = desktop_item.id().clone();
     let hide_id = hide_item.id().clone();
     let exit_id = exit_item.id().clone();
     let menu = Menu::new();
-    menu.append_items(&[&open_item, &hide_item, &separator, &exit_item])?;
+    menu.append_items(&[
+        &open_item,
+        &desktop_item,
+        &hide_item,
+        &separator,
+        &exit_item,
+    ])?;
 
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
@@ -1731,6 +2161,7 @@ fn install_system_tray(app: &AppWindow) -> Result<SystemTray> {
         .build()?;
 
     let weak = app.as_weak();
+    let weak_widget = widget.as_weak();
     #[cfg(target_os = "macos")]
     let last_left_release = Rc::new(RefCell::new(None::<Instant>));
     let event_timer = Timer::default();
@@ -1739,11 +2170,18 @@ fn install_system_tray(app: &AppWindow) -> Result<SystemTray> {
         StdDuration::from_millis(100),
         move || {
             let Some(app) = weak.upgrade() else { return };
+            let Some(widget) = weak_widget.upgrade() else {
+                return;
+            };
             while let Ok(event) = MenuEvent::receiver().try_recv() {
                 if event.id == open_id {
-                    show_main_window(&app);
+                    show_main_window(&app, Some(&widget));
+                } else if event.id == desktop_id {
+                    if let Err(error) = dock_to_desktop(&app, &widget, &state) {
+                        app.set_status(format!("吸附到桌面失败：{error}").into());
+                    }
                 } else if event.id == hide_id {
-                    hide_main_window(&app);
+                    hide_main_window(&app, Some(&widget));
                 } else if event.id == exit_id && !app.get_exit_pending() {
                     app.invoke_request_full_exit();
                 }
@@ -1753,7 +2191,7 @@ fn install_system_tray(app: &AppWindow) -> Result<SystemTray> {
                     TrayIconEvent::DoubleClick {
                         button: MouseButton::Left,
                         ..
-                    } => show_main_window(&app),
+                    } => show_main_window(&app, Some(&widget)),
                     #[cfg(target_os = "macos")]
                     TrayIconEvent::Click {
                         button: MouseButton::Left,
@@ -1766,7 +2204,7 @@ fn install_system_tray(app: &AppWindow) -> Result<SystemTray> {
                             .is_some_and(|value| now.duration_since(value).as_millis() <= 500)
                         {
                             *previous = None;
-                            show_main_window(&app);
+                            show_main_window(&app, Some(&widget));
                         } else {
                             *previous = Some(now);
                         }
@@ -1784,16 +2222,26 @@ fn install_system_tray(app: &AppWindow) -> Result<SystemTray> {
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-fn install_system_tray(_app: &AppWindow) -> Result<()> {
+fn install_system_tray(
+    _app: &AppWindow,
+    _widget: &DesktopWidget,
+    _state: Arc<Mutex<UiState>>,
+) -> Result<()> {
     Ok(())
 }
 
-fn hide_main_window(app: &AppWindow) {
+fn hide_main_window(app: &AppWindow, widget: Option<&DesktopWidget>) {
     app.set_status("已隐藏到系统托盘，双击托盘图标可恢复".into());
     let _ = app.hide();
+    if let Some(widget) = widget {
+        let _ = widget.hide();
+    }
 }
 
-fn show_main_window(app: &AppWindow) {
+fn show_main_window(app: &AppWindow, widget: Option<&DesktopWidget>) {
+    if let Some(widget) = widget {
+        let _ = widget.hide();
+    }
     let _ = app.show();
     app.set_status("主界面已从系统托盘恢复".into());
     #[cfg(any(target_os = "windows", target_os = "macos"))]

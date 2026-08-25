@@ -377,6 +377,227 @@ component WindowControl inherits Rectangle {
     touch := TouchArea { clicked => { root.clicked(); } }
 }
 
+component DesktopDayCard inherits Rectangle {
+    in property <DayCell> cell;
+    callback selected(string);
+    background: cell.selected ? #e1e4f0d9 : (touch.has-hover ? #fffdfbbb : #fffdfb73);
+    border-width: cell.today ? 1px : 0px;
+    border-color: Theme.accent;
+    border-radius: 12px;
+    clip: true;
+    opacity: cell.in-month ? 1.0 : 0.38;
+    Text {
+        x: 8px; y: 5px; width: 27px; height: 25px;
+        text: cell.day;
+        color: cell.today ? Theme.accent-deep : (cell.off-day ? Theme.holiday : Theme.ink);
+        font-size: 13px; font-weight: 750;
+        horizontal-alignment: center; vertical-alignment: center;
+    }
+    Text {
+        x: 36px; y: 6px; width: parent.width - 43px; height: 22px;
+        text: cell.holiday != "" ? cell.holiday : cell.lunar;
+        color: cell.holiday != "" ? Theme.holiday : Theme.muted;
+        font-size: 9px; horizontal-alignment: right; vertical-alignment: center;
+        overflow: elide;
+    }
+    Text {
+        x: 8px; y: 31px; width: parent.width - 16px; height: parent.height - 36px;
+        text: cell.events;
+        color: Theme.ink;
+        font-size: 9px;
+        vertical-alignment: top;
+        wrap: word-wrap;
+        overflow: elide;
+    }
+    Rectangle {
+        visible: cell.day-kind != "";
+        x: parent.width - 19px; y: parent.height - 19px; width: 15px; height: 15px;
+        background: cell.workday ? Theme.accent-soft : #f9ddddcc;
+        border-radius: 7.5px;
+        Text {
+            text: cell.day-kind;
+            color: cell.workday ? Theme.accent-deep : Theme.holiday;
+            font-size: 8px; font-weight: 750;
+            horizontal-alignment: center; vertical-alignment: center;
+        }
+    }
+    touch := TouchArea { clicked => { root.selected(root.cell.date); } }
+}
+
+component DesktopWeekView inherits Rectangle {
+    in property <CalendarWeek> week;
+    callback selected(string);
+    background: transparent;
+    HorizontalLayout {
+        spacing: 5px;
+        DesktopDayCard { horizontal-stretch: 1; cell: root.week.d0; selected(date) => { root.selected(date); } }
+        DesktopDayCard { horizontal-stretch: 1; cell: root.week.d1; selected(date) => { root.selected(date); } }
+        DesktopDayCard { horizontal-stretch: 1; cell: root.week.d2; selected(date) => { root.selected(date); } }
+        DesktopDayCard { horizontal-stretch: 1; cell: root.week.d3; selected(date) => { root.selected(date); } }
+        DesktopDayCard { horizontal-stretch: 1; cell: root.week.d4; selected(date) => { root.selected(date); } }
+        DesktopDayCard { horizontal-stretch: 1; cell: root.week.d5; selected(date) => { root.selected(date); } }
+        DesktopDayCard { horizontal-stretch: 1; cell: root.week.d6; selected(date) => { root.selected(date); } }
+    }
+}
+
+export component DesktopWidget inherits Window {
+    title: "Schedule Manager · 桌面日历";
+    icon: @image-url("../assets/schedule-logo-64.png");
+    default-font-family: "Microsoft YaHei UI";
+    no-frame: true;
+    resize-border-width: 0px;
+    preferred-width: 820px;
+    preferred-height: 610px;
+    min-width: 820px;
+    min-height: 610px;
+    max-width: 820px;
+    max-height: 610px;
+    background: transparent;
+
+    in-out property <[CalendarWeek]> calendar-weeks;
+    in-out property <[EventRow]> selected-events;
+    in-out property <string> month-title;
+    in-out property <string> selected-date-title;
+    in-out property <bool> locked: true;
+    in-out property <string> preview-event-id;
+    in-out property <string> preview-title: "点击日程查看详情";
+    in-out property <string> preview-time;
+    in-out property <string> preview-detail;
+
+    callback previous-month();
+    callback next-month();
+    callback go-today();
+    callback select-day(string);
+    callback preview-event(string);
+    callback edit-event(string);
+    callback set-locked(bool);
+    callback start-drag();
+    callback open-main();
+    callback hide-widget();
+
+    Rectangle {
+        x: 12px; y: 12px; width: parent.width - 24px; height: parent.height - 24px;
+        background: #f7f4f0c7;
+        border-width: 1px;
+        border-color: #ffffff99;
+        border-radius: 24px;
+        drop-shadow-offset-y: 8px;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: #211b2929;
+        clip: true;
+
+        VerticalLayout {
+            padding: 16px; spacing: 10px;
+            Rectangle {
+                height: 42px;
+                background: transparent;
+                TouchArea {
+                    enabled: !root.locked;
+                    pointer-event(event) => {
+                        if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                            root.start-drag();
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 7px;
+                    Image { width: 28px; height: 28px; source: @image-url("../assets/schedule-logo-64.png"); image-fit: contain; }
+                    SoftButton { width: 34px; label: "‹"; clicked => { root.previous-month(); } }
+                    SoftButton { width: 34px; label: "›"; clicked => { root.next-month(); } }
+                    Text { text: root.month-title; color: Theme.ink; font-size: 20px; font-weight: 800; vertical-alignment: center; horizontal-stretch: 1; }
+                    SoftButton { width: 54px; label: "今天"; clicked => { root.go-today(); } }
+                    SoftButton {
+                        width: 82px;
+                        label: root.locked ? "🔒 已锁定" : "🔓 可拖动";
+                        emphasized: !root.locked;
+                        clicked => { root.locked = !root.locked; root.set-locked(root.locked); }
+                    }
+                    SoftButton { width: 74px; label: "打开主程序"; clicked => { root.open-main(); } }
+                    SoftButton { width: 34px; label: "×"; clicked => { root.hide-widget(); } }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 10px; vertical-stretch: 1;
+                Rectangle {
+                    background: #fffdfb59;
+                    border-radius: 18px;
+                    horizontal-stretch: 3;
+                    VerticalLayout {
+                        padding: 10px; spacing: 5px;
+                        HorizontalLayout {
+                            height: 22px; spacing: 5px;
+                            Text { text: "一"; color: Theme.muted; font-size: 11px; font-weight: 700; horizontal-alignment: center; horizontal-stretch: 1; }
+                            Text { text: "二"; color: Theme.muted; font-size: 11px; font-weight: 700; horizontal-alignment: center; horizontal-stretch: 1; }
+                            Text { text: "三"; color: Theme.muted; font-size: 11px; font-weight: 700; horizontal-alignment: center; horizontal-stretch: 1; }
+                            Text { text: "四"; color: Theme.muted; font-size: 11px; font-weight: 700; horizontal-alignment: center; horizontal-stretch: 1; }
+                            Text { text: "五"; color: Theme.muted; font-size: 11px; font-weight: 700; horizontal-alignment: center; horizontal-stretch: 1; }
+                            Text { text: "六"; color: Theme.muted; font-size: 11px; font-weight: 700; horizontal-alignment: center; horizontal-stretch: 1; }
+                            Text { text: "日"; color: Theme.muted; font-size: 11px; font-weight: 700; horizontal-alignment: center; horizontal-stretch: 1; }
+                        }
+                        for week in root.calendar-weeks : DesktopWeekView {
+                            vertical-stretch: 1;
+                            week: week;
+                            selected(date) => { root.select-day(date); }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    width: 244px;
+                    background: #fffdfb7d;
+                    border-radius: 18px;
+                    VerticalLayout {
+                        padding: 12px; spacing: 8px;
+                        Text { text: root.selected-date-title; color: Theme.ink; font-size: 15px; font-weight: 800; }
+                        Rectangle { height: 1px; background: #ffffff99; }
+                        ScrollView {
+                            vertical-stretch: 1;
+                            VerticalLayout {
+                                spacing: 5px;
+                                for row in root.selected-events : EventItem {
+                                    event-data: row;
+                                    selected: row.id == root.preview-event-id;
+                                    clicked(id) => { root.preview-event(id); }
+                                }
+                                Text {
+                                    visible: root.selected-events.length == 0;
+                                    height: 54px;
+                                    text: "这一天还没有日程";
+                                    color: Theme.muted; font-size: 11px;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                }
+                            }
+                        }
+                        Rectangle {
+                            height: root.preview-event-id == "" ? 64px : 126px;
+                            background: #fffdfba8;
+                            border-radius: 12px;
+                            VerticalLayout {
+                                padding: 10px; spacing: 4px;
+                                Text { text: root.preview-title; color: Theme.ink; font-size: 12px; font-weight: 750; overflow: elide; }
+                                Text { visible: root.preview-event-id != ""; text: root.preview-time; color: Theme.accent-deep; font-size: 10px; }
+                                Text { visible: root.preview-event-id != ""; text: root.preview-detail; color: Theme.muted; font-size: 9px; wrap: word-wrap; overflow: elide; vertical-stretch: 1; }
+                                SoftButton {
+                                    visible: root.preview-event-id != "";
+                                    height: 30px;
+                                    label: "在主程序中编辑";
+                                    emphasized: true;
+                                    clicked => { root.edit-event(root.preview-event-id); }
+                                }
+                            }
+                        }
+                        Text {
+                            text: root.locked ? "已锁定位置；日程仍可点击" : "拖动顶部空白区域调整位置";
+                            color: Theme.muted; font-size: 9px; horizontal-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "Schedule Manager";
     icon: @image-url("../assets/schedule-logo-64.png");
@@ -475,6 +696,7 @@ export component AppWindow inherits Window {
     callback adjust-lunar-date(int, int);
     callback choose-close-action(int);
     callback request-hide-to-tray();
+    callback request-dock-to-desktop();
     callback request-full-exit();
     callback save-settings();
     callback test-notification();
@@ -508,6 +730,8 @@ export component AppWindow inherits Window {
                             if !root.exit-pending { root.request-full-exit(); }
                         } else if root.close-behavior == 2 {
                             root.request-hide-to-tray();
+                        } else if root.close-behavior == 3 {
+                            root.request-dock-to-desktop();
                         } else {
                             root.close-choice-visible = true;
                         }
@@ -878,8 +1102,14 @@ export component AppWindow inherits Window {
                                 emphasized: root.settings-close-behavior == 1;
                                 clicked => { root.settings-close-behavior = 1; }
                             }
+                            SoftButton {
+                                horizontal-stretch: 1;
+                                label: "吸附桌面";
+                                emphasized: root.settings-close-behavior == 3;
+                                clicked => { root.settings-close-behavior = 3; }
+                            }
                         }
-                        Text { text: "托盘右键可以随时打开主界面或同步并退出，双击托盘可恢复窗口。"; color: Theme.muted; font-size: 10px; wrap: word-wrap; }
+                        Text { text: "吸附桌面会保留可点击日历；托盘右键可以打开主界面、重新吸附或同步退出。"; color: Theme.muted; font-size: 10px; wrap: word-wrap; }
                         Rectangle { height: 1px; background: Theme.island-soft; }
                         Text { text: "开机启动"; color: Theme.ink; font-size: 12px; font-weight: 700; }
                         Toggle { label: "登录系统时在托盘后台启动"; checked <=> root.settings-autostart-enabled; }
@@ -951,7 +1181,7 @@ export component AppWindow inherits Window {
         background: #27232e66;
         TouchArea { clicked => { } }
         Island {
-            width: 430px; height: 320px;
+            width: 430px; height: 370px;
             x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
             TouchArea { }
             VerticalLayout {
@@ -971,8 +1201,16 @@ export component AppWindow inherits Window {
                     }
                 }
                 SoftButton {
-                    label: "隐藏界面到系统托盘并继续提醒";
+                    label: "吸附为桌面日历并继续提醒";
                     emphasized: true;
+                    clicked => {
+                        root.choose-close-action(3);
+                        root.close-choice-visible = false;
+                        root.request-dock-to-desktop();
+                    }
+                }
+                SoftButton {
+                    label: "隐藏界面到系统托盘并继续提醒";
                     clicked => {
                         root.choose-close-action(2);
                         root.close-choice-visible = false;
