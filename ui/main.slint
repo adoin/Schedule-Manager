@@ -444,6 +444,9 @@ export component AppWindow inherits Window {
     in-out property <bool> notification-sound-enabled: true;
     in-out property <bool> settings-notifications-enabled: true;
     in-out property <bool> settings-notification-sound-enabled: true;
+    in-out property <bool> autostart-enabled: false;
+    in-out property <bool> settings-autostart-enabled: false;
+    in-out property <string> autostart-status: "未启用";
     in-out property <string> auth-email;
     in-out property <string> auth-password;
     in-out property <string> auth-display-name;
@@ -533,6 +536,7 @@ export component AppWindow inherits Window {
                             root.settings-close-behavior = root.close-behavior == -1 ? 0 : root.close-behavior;
                             root.settings-notifications-enabled = root.notifications-enabled;
                             root.settings-notification-sound-enabled = root.notification-sound-enabled;
+                            root.settings-autostart-enabled = root.autostart-enabled;
                             root.settings-visible = true;
                         }
                     }
@@ -839,53 +843,67 @@ export component AppWindow inherits Window {
         background: #27232e66;
         TouchArea { clicked => { } }
         Island {
-            width: 430px; height: 430px;
+            width: 440px;
+            height: parent.height < 560px ? parent.height - 40px : 520px;
             x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
             TouchArea { }
             VerticalLayout {
-                padding: 22px; spacing: 12px;
+                padding: 20px; spacing: 10px;
                 HorizontalLayout { height: 36px;
                     Text { text: "设置"; color: Theme.ink; font-size: 20px; font-weight: 800; horizontal-stretch: 1; vertical-alignment: center; }
                     SoftButton { width: 34px; label: "×"; clicked => { root.settings-visible = false; } }
                 }
-                Text { text: "关闭按钮行为"; color: Theme.ink; font-size: 12px; font-weight: 700; }
-                Text { text: "选择后会一直沿用，直到你在这里修改。"; color: Theme.muted; font-size: 10px; }
-                HorizontalLayout { height: 38px; spacing: 8px;
-                    SoftButton {
-                        horizontal-stretch: 1;
-                        label: "最小化到任务栏";
-                        emphasized: root.settings-close-behavior == 0;
-                        clicked => { root.settings-close-behavior = 0; }
-                    }
-                    SoftButton {
-                        horizontal-stretch: 1;
-                        label: "隐藏到托盘";
-                        emphasized: root.settings-close-behavior == 2;
-                        clicked => { root.settings-close-behavior = 2; }
-                    }
-                    SoftButton {
-                        horizontal-stretch: 1;
-                        label: "完全退出";
-                        emphasized: root.settings-close-behavior == 1;
-                        clicked => { root.settings-close-behavior = 1; }
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 10px;
+                        Text { text: "关闭按钮行为"; color: Theme.ink; font-size: 12px; font-weight: 700; }
+                        Text { text: "选择后会一直沿用，直到你在这里修改。"; color: Theme.muted; font-size: 10px; }
+                        HorizontalLayout { height: 38px; spacing: 8px;
+                            SoftButton {
+                                horizontal-stretch: 1;
+                                label: "最小化到任务栏";
+                                emphasized: root.settings-close-behavior == 0;
+                                clicked => { root.settings-close-behavior = 0; }
+                            }
+                            SoftButton {
+                                horizontal-stretch: 1;
+                                label: "隐藏到托盘";
+                                emphasized: root.settings-close-behavior == 2;
+                                clicked => { root.settings-close-behavior = 2; }
+                            }
+                            SoftButton {
+                                horizontal-stretch: 1;
+                                label: "完全退出";
+                                emphasized: root.settings-close-behavior == 1;
+                                clicked => { root.settings-close-behavior = 1; }
+                            }
+                        }
+                        Text { text: "托盘右键可以随时打开主界面或同步并退出，双击托盘可恢复窗口。"; color: Theme.muted; font-size: 10px; wrap: word-wrap; }
+                        Rectangle { height: 1px; background: Theme.island-soft; }
+                        Text { text: "开机启动"; color: Theme.ink; font-size: 12px; font-weight: 700; }
+                        Toggle { label: "登录系统时在托盘后台启动"; checked <=> root.settings-autostart-enabled; }
+                        Text {
+                            text: root.autostart-status;
+                            color: Theme.muted; font-size: 10px; wrap: word-wrap;
+                        }
+                        Rectangle { height: 1px; background: Theme.island-soft; }
+                        Text { text: "提醒与通知"; color: Theme.ink; font-size: 12px; font-weight: 700; }
+                        Toggle { label: "启用系统通知"; checked <=> root.settings-notifications-enabled; }
+                        Toggle {
+                            label: "播放提醒音效";
+                            checked <=> root.settings-notification-sound-enabled;
+                            enabled: root.settings-notifications-enabled;
+                            opacity: root.settings-notifications-enabled ? 1 : 0.45;
+                        }
+                        SoftButton { label: "发送测试通知"; clicked => { root.test-notification(); } }
+                        Text {
+                            text: "如果测试通知没有出现，请检查系统通知权限和勿扰模式。";
+                            color: Theme.muted; font-size: 10px; wrap: word-wrap;
+                        }
                     }
                 }
-                Text { text: "托盘右键可以随时打开主界面或同步并退出，双击托盘可恢复窗口。"; color: Theme.muted; font-size: 10px; wrap: word-wrap; }
                 Rectangle { height: 1px; background: Theme.island-soft; }
-                Text { text: "提醒与通知"; color: Theme.ink; font-size: 12px; font-weight: 700; }
-                Toggle { label: "启用系统通知"; checked <=> root.settings-notifications-enabled; }
-                Toggle {
-                    label: "播放提醒音效";
-                    checked <=> root.settings-notification-sound-enabled;
-                    enabled: root.settings-notifications-enabled;
-                    opacity: root.settings-notifications-enabled ? 1 : 0.45;
-                }
-                SoftButton { label: "发送测试通知"; clicked => { root.test-notification(); } }
-                Text {
-                    text: "如果测试通知没有出现，请检查 Windows 的通知权限和勿扰模式。";
-                    color: Theme.muted; font-size: 10px; wrap: word-wrap;
-                }
-                Rectangle { vertical-stretch: 1; }
                 HorizontalLayout { height: 36px; spacing: 8px;
                     Rectangle { horizontal-stretch: 1; }
                     SoftButton { width: 72px; label: "取消"; clicked => { root.settings-visible = false; } }

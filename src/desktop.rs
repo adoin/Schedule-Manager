@@ -12,14 +12,19 @@ use anyhow::{Context, Result, anyhow};
 use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime, TimeZone, Timelike, Utc, Weekday};
 use chrono_tz::Asia::Shanghai;
 use slint::{Color, ComponentHandle, ModelRc, Timer, TimerMode, VecModel};
+#[cfg(target_os = "windows")]
+use std::process::{Command, Output};
 #[cfg(target_os = "macos")]
 use std::{cell::RefCell, rc::Rc, time::Instant};
 use std::{
     collections::{HashMap, VecDeque},
+    ffi::OsStr,
     sync::{Arc, Mutex},
     thread,
     time::Duration as StdDuration,
 };
+#[cfg(target_os = "macos")]
+use std::{fs, path::PathBuf};
 
 slint::include_modules!();
 
@@ -42,6 +47,7 @@ struct SyncConflict {
 }
 
 pub fn run() -> Result<()> {
+    let mut startup_hidden = std::env::args_os().any(|arg| arg == OsStr::new("--startup-hidden"));
     #[cfg(target_os = "windows")]
     let notification_identity_error = crate::windows_notifications::prepare_identity().err();
     let repository = LocalRepository::open()?;
@@ -56,12 +62,19 @@ pub fn run() -> Result<()> {
         .unwrap_or(-1);
     let notifications_enabled = bool_setting(&repository, "notifications_enabled", true);
     let notification_sound_enabled = bool_setting(&repository, "notification_sound_enabled", true);
+    let autostart_enabled = bool_setting(&repository, "autostart_enabled", false);
+    let autostart_result = configure_autostart(autostart_enabled);
     app.set_close_behavior(close_behavior);
     app.set_settings_close_behavior(close_behavior.max(0));
     app.set_notifications_enabled(notifications_enabled);
     app.set_notification_sound_enabled(notification_sound_enabled);
     app.set_settings_notifications_enabled(notifications_enabled);
     app.set_settings_notification_sound_enabled(notification_sound_enabled);
+    app.set_autostart_enabled(autostart_enabled);
+    app.set_settings_autostart_enabled(autostart_enabled);
+    app.set_autostart_status(
+        autostart_status(autostart_enabled, autostart_result.as_ref().err()).into(),
+    );
     let state = Arc::new(Mutex::new(UiState {
         visible_month: today.with_day(1).unwrap(),
         selected_date: today,
@@ -83,6 +96,7 @@ pub fn run() -> Result<()> {
         Ok(tray) => Some(tray),
         Err(error) => {
             eprintln!("system tray startup failed: {error:#}");
+            startup_hidden = false;
             app.set_close_behavior(-1);
             app.set_status(format!("系统托盘启动失败，请关闭时选择完全退出：{error}").into());
             None
@@ -99,7 +113,11 @@ pub fn run() -> Result<()> {
     {
         sync_in_background(&app, state.clone());
     }
-    app.run()?;
+    if startup_hidden {
+        slint::run_event_loop()?;
+    } else {
+        app.run()?;
+    }
     Ok(())
 }
 
@@ -156,7 +174,9 @@ fn wire_callbacks(app: &AppWindow, state: Arc<Mutex<UiState>>) {
         let close_behavior = app.get_settings_close_behavior().clamp(0, 2);
         let notifications_enabled = app.get_settings_notifications_enabled();
         let notification_sound_enabled = app.get_settings_notification_sound_enabled();
+        let autostart_enabled = app.get_settings_autostart_enabled();
         let result = (|| -> Result<()> {
+            configure_autostart(autostart_enabled)?;
             let repo = LocalRepository::open()?;
             repo.set_setting("close_behavior", &close_behavior.to_string())?;
             repo.set_setting(
@@ -175,6 +195,10 @@ fn wire_callbacks(app: &AppWindow, state: Arc<Mutex<UiState>>) {
                     "false"
                 },
             )?;
+            repo.set_setting(
+                "autostart_enabled",
+                if autostart_enabled { "true" } else { "false" },
+            )?;
             Ok(())
         })();
         match result {
@@ -182,6 +206,8 @@ fn wire_callbacks(app: &AppWindow, state: Arc<Mutex<UiState>>) {
                 app.set_close_behavior(close_behavior);
                 app.set_notifications_enabled(notifications_enabled);
                 app.set_notification_sound_enabled(notification_sound_enabled);
+                app.set_autostart_enabled(autostart_enabled);
+                app.set_autostart_status(autostart_status(autostart_enabled, None).into());
                 app.set_settings_visible(false);
                 app.set_status("设置已保存".into());
             }
@@ -1517,6 +1543,154 @@ fn parse_color(value: &str) -> Color {
         }
     }
     Color::from_rgb_u8(104, 120, 214)
+}
+
+fn autostart_status(enabled: bool, error: Option<&anyhow::Error>) -> String {
+    if let Some(error) = error {
+        return format!("启动项检测失败：{error}");
+    }
+    if !enabled {
+        return "未启用".to_owned();
+    }
+    #[cfg(target_os = "windows")]
+    return "已启用：Windows 登录计划任务已检测并同步".to_owned();
+    #[cfg(target_os = "macos")]
+    return "已启用：macOS 用户启动项已检测并同步".to_owned();
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    "当前系统不支持开机启动".to_owned()
+}
+
+#[cfg(target_os = "windows")]
+const AUTOSTART_TASK_NAME: &str = "Schedule Manager";
+
+#[cfg(target_os = "windows")]
+fn configure_autostart(enabled: bool) -> Result<()> {
+    if !enabled {
+        if scheduled_task_exists()? {
+            let output = run_schtasks(&["/Delete", "/TN", AUTOSTART_TASK_NAME, "/F"])?;
+            ensure_command_succeeded("删除开机启动计划任务", &output)?;
+        }
+        return Ok(());
+    }
+
+    let executable = std::env::current_exe().context("无法读取当前程序路径")?;
+    let action = format!("\"{}\" --startup-hidden", executable.display());
+    let output = run_schtasks(&[
+        "/Create",
+        "/TN",
+        AUTOSTART_TASK_NAME,
+        "/TR",
+        &action,
+        "/SC",
+        "ONLOGON",
+        "/DELAY",
+        "0000:10",
+        "/RL",
+        "LIMITED",
+        "/F",
+    ])?;
+    ensure_command_succeeded("创建开机启动计划任务", &output)?;
+    if !scheduled_task_exists()? {
+        return Err(anyhow!("计划任务创建后未能通过检测"));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn scheduled_task_exists() -> Result<bool> {
+    Ok(run_schtasks(&["/Query", "/TN", AUTOSTART_TASK_NAME])?
+        .status
+        .success())
+}
+
+#[cfg(target_os = "windows")]
+fn run_schtasks(arguments: &[&str]) -> Result<Output> {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    Command::new("schtasks.exe")
+        .args(arguments)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .context("无法运行 Windows 计划任务工具")
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_command_succeeded(action: &str, output: &Output) -> Result<()> {
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = if output.stderr.is_empty() {
+        String::from_utf8_lossy(&output.stdout)
+    } else {
+        String::from_utf8_lossy(&output.stderr)
+    };
+    Err(anyhow!("{action}失败：{}", detail.trim()))
+}
+
+#[cfg(target_os = "macos")]
+fn configure_autostart(enabled: bool) -> Result<()> {
+    let launch_agent = launch_agent_path()?;
+    if !enabled {
+        if launch_agent.exists() {
+            fs::remove_file(&launch_agent).context("无法删除 macOS 用户启动项")?;
+        }
+        return Ok(());
+    }
+
+    let executable = std::env::current_exe().context("无法读取当前程序路径")?;
+    let parent = launch_agent
+        .parent()
+        .ok_or_else(|| anyhow!("macOS 用户启动项目录无效"))?;
+    fs::create_dir_all(parent).context("无法创建 macOS 用户启动项目录")?;
+    let executable = xml_escape(&executable.to_string_lossy());
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.emssion.schedule-manager</string>
+  <key>ProgramArguments</key>
+  <array><string>{executable}</string><string>--startup-hidden</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><false/>
+</dict>
+</plist>
+"#
+    );
+    fs::write(&launch_agent, plist).context("无法写入 macOS 用户启动项")?;
+    let installed = fs::read_to_string(&launch_agent).context("无法检测 macOS 用户启动项")?;
+    if !installed.contains("--startup-hidden") || !installed.contains(&executable) {
+        return Err(anyhow!("macOS 用户启动项写入后未能通过检测"));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn launch_agent_path() -> Result<PathBuf> {
+    let base = directories::BaseDirs::new().ok_or_else(|| anyhow!("无法定位用户目录"))?;
+    Ok(base
+        .home_dir()
+        .join("Library/LaunchAgents/com.emssion.schedule-manager.plist"))
+}
+
+#[cfg(target_os = "macos")]
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn configure_autostart(enabled: bool) -> Result<()> {
+    if enabled {
+        Err(anyhow!("当前系统不支持开机启动"))
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]

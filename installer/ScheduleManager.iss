@@ -1,6 +1,6 @@
 #define AppName "Schedule Manager"
 #ifndef AppVersion
-#define AppVersion "1.0.1"
+#define AppVersion "1.0.2"
 #endif
 #ifndef SourceDir
 #define SourceDir "..\dist\ScheduleManager"
@@ -36,6 +36,9 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: deskto
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
+
+[UninstallRun]
+Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN ""Schedule Manager"" /F"; Flags: runhidden waituntilterminated
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
