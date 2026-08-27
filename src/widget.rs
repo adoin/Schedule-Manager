@@ -626,6 +626,11 @@ impl CalendarWidgetApp {
 
 impl eframe::App for CalendarWidgetApp {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if take_exit_signal() {
+            eprintln!("widget-exit-signal status=received");
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+            return;
+        }
         self.install_fonts(ctx);
         #[cfg(target_os = "windows")]
         {
@@ -988,6 +993,32 @@ fn command_path() -> Result<PathBuf> {
     let project = directories::ProjectDirs::from("com", "Emssion", "ScheduleManager")
         .context("cannot resolve widget command directory")?;
     Ok(project.data_local_dir().join("widget-command.json"))
+}
+
+fn exit_signal_path() -> Result<PathBuf> {
+    let project = directories::ProjectDirs::from("com", "Emssion", "ScheduleManager")
+        .context("cannot resolve widget command directory")?;
+    Ok(project.data_local_dir().join("desktop-widget-exit.signal"))
+}
+
+fn take_exit_signal() -> bool {
+    let Ok(path) = exit_signal_path() else {
+        return false;
+    };
+    if !path.exists() {
+        return false;
+    }
+    match fs::remove_file(&path) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            eprintln!(
+                "widget-exit-signal status=failed path={} error={error}",
+                path.display()
+            );
+            false
+        }
+    }
 }
 
 fn load_config() -> Result<WidgetConfig> {

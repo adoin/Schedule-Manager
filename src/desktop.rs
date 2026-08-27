@@ -2525,6 +2525,15 @@ fn external_widget_command_path() -> Result<PathBuf> {
 }
 
 #[cfg(target_os = "windows")]
+fn external_widget_exit_signal_path() -> Result<PathBuf> {
+    let directories = directories::ProjectDirs::from("com", "Emssion", "ScheduleManager")
+        .ok_or_else(|| anyhow!("无法定位本地数据目录"))?;
+    Ok(directories
+        .data_local_dir()
+        .join("desktop-widget-exit.signal"))
+}
+
+#[cfg(target_os = "windows")]
 fn take_external_widget_command() -> Result<Option<ExternalWidgetCommand>> {
     let path = external_widget_command_path()?;
     if !path.exists() {
@@ -2613,9 +2622,10 @@ fn external_desktop_widget_window() -> Option<windows_sys::Win32::Foundation::HW
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
 
-    // This title is intentionally different from the legacy hidden Slint
-    // component; matching the old title made docking skip the WGPU process.
-    let title = OsStr::new("Schedule Manager Desktop Widget WGPU")
+    // This fallback only sees the widget before it becomes a WorkerW child.
+    // Keep it aligned with widget::WINDOW_IDENTITY; the exit signal handles
+    // the normal, already-attached state.
+    let title = OsStr::new("Schedule Manager Desktop Widget")
         .encode_wide()
         .chain(Some(0))
         .collect::<Vec<_>>();
@@ -2635,6 +2645,11 @@ fn spawn_external_desktop_widget(app: &AppWindow) -> Result<()> {
             "桌面挂件程序不存在：{}；请先运行 scripts/dev.ps1 重新构建",
             executable.display()
         ));
+    }
+    // A previous forced shutdown may have left the one-shot signal behind.
+    // Remove it before spawning so a fresh widget does not immediately exit.
+    if let Ok(path) = external_widget_exit_signal_path() {
+        let _ = fs::remove_file(path);
     }
     let log_path = application_log_path()
         .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
@@ -2693,6 +2708,30 @@ fn spawn_external_desktop_widget(app: &AppWindow) -> Result<()> {
 #[cfg(target_os = "windows")]
 fn close_external_desktop_widget() {
     use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
+    // Once attached to WorkerW, the widget is a child window and FindWindowW
+    // can no longer discover it reliably. The signal is the primary graceful
+    // shutdown path; WM_CLOSE remains a fast compatibility fallback while the
+    // widget is still a top-level window during startup.
+    match external_widget_exit_signal_path() {
+        Ok(path) => {
+            if let Some(parent) = path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            match fs::write(&path, b"exit") {
+                Ok(()) => app_log(format!(
+                    "external desktop widget exit signal written path={}",
+                    path.display()
+                )),
+                Err(error) => app_log(format!(
+                    "external desktop widget exit signal failed path={} error={error:#}",
+                    path.display()
+                )),
+            }
+        }
+        Err(error) => app_log(format!(
+            "external desktop widget exit signal path failed: {error:#}"
+        )),
+    }
     if let Some(window) = external_desktop_widget_window() {
         unsafe {
             let _ = PostMessageW(window, WM_CLOSE, 0, 0);
