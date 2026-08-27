@@ -29,7 +29,10 @@ jobs:
           cache-on-failure: true
 
       - name: Test
-        run: cargo test --locked --all-targets
+        # Compile tests with the same profile used by the packaging step below.
+        # Cargo can then reuse the release artifacts instead of rebuilding the
+        # full Slint/Windows dependency graph a second time.
+        run: cargo test --release --locked --all-targets
 
       - name: Package Windows installer
         shell: pwsh
