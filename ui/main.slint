@@ -380,7 +380,7 @@ component WindowControl inherits Rectangle {
 component DesktopDayCard inherits Rectangle {
     in property <DayCell> cell;
     callback selected(string);
-    background: cell.selected ? #e1e4f0d9 : (touch.has-hover ? #fffdfbbb : #fffdfb73);
+    background: cell.selected ? #dfe3ff73 : (touch.has-hover ? #ffffff5c : #ffffff29);
     border-width: cell.today ? 1px : 0px;
     border-color: Theme.accent;
     border-radius: 12px;
@@ -412,7 +412,7 @@ component DesktopDayCard inherits Rectangle {
     Rectangle {
         visible: cell.day-kind != "";
         x: parent.width - 19px; y: parent.height - 19px; width: 15px; height: 15px;
-        background: cell.workday ? Theme.accent-soft : #f9ddddcc;
+        background: cell.workday ? #dfe3ff73 : #f9dddd73;
         border-radius: 7.5px;
         Text {
             text: cell.day-kind;
@@ -472,18 +472,17 @@ export component DesktopWidget inherits Window {
     callback edit-event(string);
     callback set-locked(bool);
     callback start-drag();
+    callback drag-move();
+    callback end-drag();
     callback open-main();
     callback hide-widget();
 
     Rectangle {
-        x: 12px; y: 12px; width: parent.width - 24px; height: parent.height - 24px;
-        background: #f7f4f0c7;
+        width: parent.width; height: parent.height;
+        background: #f7f4f080;
         border-width: 1px;
-        border-color: #ffffff99;
+        border-color: #ffffff80;
         border-radius: 24px;
-        drop-shadow-offset-y: 8px;
-        drop-shadow-blur: 24px;
-        drop-shadow-color: #211b2929;
         clip: true;
 
         VerticalLayout {
@@ -491,20 +490,34 @@ export component DesktopWidget inherits Window {
             Rectangle {
                 height: 42px;
                 background: transparent;
-                TouchArea {
-                    enabled: !root.locked;
-                    pointer-event(event) => {
-                        if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
-                            root.start-drag();
-                        }
-                    }
-                }
                 HorizontalLayout {
                     spacing: 7px;
                     Image { width: 28px; height: 28px; source: @image-url("../assets/schedule-logo-64.png"); image-fit: contain; }
                     SoftButton { width: 34px; label: "‹"; clicked => { root.previous-month(); } }
                     SoftButton { width: 34px; label: "›"; clicked => { root.next-month(); } }
-                    Text { text: root.month-title; color: Theme.ink; font-size: 20px; font-weight: 800; vertical-alignment: center; horizontal-stretch: 1; }
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        background: drag-area.has-hover && !root.locked ? #ffffff24 : transparent;
+                        border-radius: 9px;
+                        Text {
+                            x: 8px; width: parent.width - 16px; height: parent.height;
+                            text: root.month-title;
+                            color: Theme.ink; font-size: 20px; font-weight: 800;
+                            vertical-alignment: center;
+                        }
+                        drag-area := TouchArea {
+                            enabled: !root.locked;
+                            pointer-event(event) => {
+                                if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                                    root.start-drag();
+                                } else if (event.kind == PointerEventKind.move) {
+                                    root.drag-move();
+                                } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                                    root.end-drag();
+                                }
+                            }
+                        }
+                    }
                     SoftButton { width: 54px; label: "今天"; clicked => { root.go-today(); } }
                     SoftButton {
                         width: 82px;
@@ -520,7 +533,7 @@ export component DesktopWidget inherits Window {
             HorizontalLayout {
                 spacing: 10px; vertical-stretch: 1;
                 Rectangle {
-                    background: #fffdfb59;
+                    background: #ffffff1f;
                     border-radius: 18px;
                     horizontal-stretch: 3;
                     VerticalLayout {
@@ -545,7 +558,7 @@ export component DesktopWidget inherits Window {
 
                 Rectangle {
                     width: 244px;
-                    background: #fffdfb7d;
+                    background: #ffffff29;
                     border-radius: 18px;
                     VerticalLayout {
                         padding: 12px; spacing: 8px;
@@ -571,7 +584,7 @@ export component DesktopWidget inherits Window {
                         }
                         Rectangle {
                             height: root.preview-event-id == "" ? 64px : 126px;
-                            background: #fffdfba8;
+                            background: #ffffff38;
                             border-radius: 12px;
                             VerticalLayout {
                                 padding: 10px; spacing: 4px;
@@ -1067,8 +1080,8 @@ export component AppWindow inherits Window {
         background: #27232e66;
         TouchArea { clicked => { } }
         Island {
-            width: 440px;
-            height: parent.height < 560px ? parent.height - 40px : 520px;
+            width: parent.width < 660px ? parent.width - 40px : 620px;
+            height: parent.height < 580px ? parent.height - 40px : 540px;
             x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
             TouchArea { }
             VerticalLayout {

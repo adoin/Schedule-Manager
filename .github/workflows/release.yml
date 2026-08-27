@@ -13,20 +13,8 @@ env:
 
 jobs:
   build:
-    name: Build ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Windows
-            os: windows-latest
-            artifact: schedule-manager-windows-installer
-            asset-path: dist/ScheduleManager-Setup-*.exe
-          - name: macOS
-            os: macos-latest
-            artifact: schedule-manager-macos-app
-            asset-path: dist/ScheduleManager-macOS-*.zip
+    name: Build Windows installer
+    runs-on: windows-latest
 
     steps:
       - name: Checkout
@@ -44,7 +32,6 @@ jobs:
         run: cargo test --locked --all-targets
 
       - name: Package Windows installer
-        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -52,24 +39,13 @@ jobs:
           $version = "${{ github.ref_name }}".TrimStart("v")
           .\scripts\package.ps1 -Installer -Version $version
 
-      - name: Package macOS app
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          APP_VERSION="$version" bash scripts/package-macos.sh
-          ditto -c -k --sequesterRsrc --keepParent \
-            "dist/Schedule Manager.app" \
-            "dist/ScheduleManager-macOS-$version.zip"
-
       - name: Upload installer package
         uses: actions/upload-artifact@v6
         with:
-          name: ${{ matrix.artifact }}
+          name: schedule-manager-windows-installer
           if-no-files-found: error
           retention-days: 3
-          path: ${{ matrix.asset-path }}
+          path: dist/ScheduleManager-Setup-*.exe
 
   release:
     name: Publish GitHub release
@@ -85,9 +61,8 @@ jobs:
       - name: Download installer packages
         uses: actions/download-artifact@v7
         with:
-          pattern: schedule-manager-*
+          name: schedule-manager-windows-installer
           path: release-assets
-          merge-multiple: true
 
       - name: Publish release assets
         env:
@@ -101,7 +76,7 @@ jobs:
             gh release create "$TAG_NAME" release-assets/* \
               --verify-tag \
               --title "Schedule Manager $TAG_NAME" \
-              --notes "Windows 与 macOS 自动构建版本。"
+              --notes "Windows 自动构建安装版本。"
           fi
 
   cleanup:

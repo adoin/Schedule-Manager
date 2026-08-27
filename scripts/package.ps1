@@ -7,6 +7,7 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $stagePath = Join-Path $projectRoot 'dist\ScheduleManager'
 $binaryPath = Join-Path $projectRoot 'target\release\schedule-manager.exe'
+$widgetBinaryPath = Join-Path $projectRoot 'target\release\schedule-desktop-widget.exe'
 if ([string]::IsNullOrWhiteSpace($Version)) {
     $manifest = Get-Content -LiteralPath (Join-Path $projectRoot 'Cargo.toml') -Raw
     $match = [regex]::Match($manifest, '(?m)^version\s*=\s*"([^"]+)"')
@@ -28,9 +29,12 @@ if (-not (Get-Command perl.exe -ErrorAction SilentlyContinue)) {
 
 Push-Location $projectRoot
 try {
-    cargo build --release --locked --bin schedule-manager
+    cargo build --release --locked --bins
     if (-not (Test-Path -LiteralPath $binaryPath)) {
         throw "Release executable missing: $binaryPath"
+    }
+    if (-not (Test-Path -LiteralPath $widgetBinaryPath)) {
+        throw "Desktop widget executable missing: $widgetBinaryPath"
     }
     if (Test-Path -LiteralPath $stagePath) {
         $resolvedStage = (Resolve-Path -LiteralPath $stagePath).Path
@@ -42,6 +46,7 @@ try {
     }
     New-Item -ItemType Directory -Path $stagePath -Force | Out-Null
     Copy-Item -LiteralPath $binaryPath -Destination (Join-Path $stagePath 'ScheduleManager.exe')
+    Copy-Item -LiteralPath $widgetBinaryPath -Destination (Join-Path $stagePath 'schedule-desktop-widget.exe')
     Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination (Join-Path $stagePath 'README.md')
     Write-Host "Portable folder ready: $stagePath"
 

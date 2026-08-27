@@ -6,6 +6,8 @@ pub mod repository;
 pub mod api_client;
 #[cfg(feature = "desktop")]
 pub mod desktop;
+#[cfg(feature = "desktop")]
+pub mod widget;
 #[cfg(all(feature = "desktop", target_os = "windows"))]
 pub mod windows_notifications;
 

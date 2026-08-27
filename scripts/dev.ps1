@@ -21,6 +21,7 @@ $logDate = Get-Date -Format "yyyy-MM-dd"
 $stdoutLog = Join-Path $stateDir "dev-watch.$logDate.out.log"
 $stderrLog = Join-Path $stateDir "dev-watch.$logDate.err.log"
 $mainExe = Join-Path $root "target\debug\schedule-manager.exe"
+$widgetExe = Join-Path $root "target\debug\schedule-desktop-widget.exe"
 $exitSentinel = Join-Path $stateDir "intentional-exit"
 
 New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
@@ -111,15 +112,25 @@ function Stop-MainWindow {
             Write-DevLog "stop stray debug app pid=$($_.ProcessId)"
             Stop-ProcessTree -ProcessId $_.ProcessId
         }
+
+    Get-CimInstance Win32_Process -Filter "Name='schedule-desktop-widget.exe'" -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.ExecutablePath -and
+            [string]::Equals($_.ExecutablePath, $widgetExe, [System.StringComparison]::OrdinalIgnoreCase)
+        } |
+        ForEach-Object {
+            Write-DevLog "stop stray debug widget pid=$($_.ProcessId)"
+            Stop-ProcessTree -ProcessId $_.ProcessId
+        }
 }
 
 function Build-App {
-    Write-DevLog "cargo build --bin schedule-manager"
+    Write-DevLog "cargo build --bins"
     Push-Location $root
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
-        & cargo build --bin schedule-manager >> $stdoutLog 2>> $stderrLog
+        & cargo build --bins >> $stdoutLog 2>> $stderrLog
         $buildExitCode = $LASTEXITCODE
     }
     finally {
@@ -132,7 +143,7 @@ function Build-App {
         return $false
     }
 
-    Write-DevLog "built app=$mainExe"
+    Write-DevLog "built app=$mainExe widget=$widgetExe"
     return $true
 }
 

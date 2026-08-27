@@ -14,19 +14,64 @@ use chrono_tz::Asia::Shanghai;
 use serde::{Deserialize, Serialize};
 use slint::{Color, ComponentHandle, ModelRc, Timer, TimerMode, VecModel};
 #[cfg(target_os = "windows")]
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 #[cfg(target_os = "macos")]
 use std::{cell::RefCell, rc::Rc, time::Instant};
 use std::{
     collections::{HashMap, VecDeque},
     ffi::OsStr,
-    fs,
+    fs::{self, OpenOptions},
+    io::Write,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     thread,
     time::Duration as StdDuration,
 };
 slint::include_modules!();
+
+static APPLICATION_LOG_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn application_log_path() -> Option<PathBuf> {
+    let directories = directories::ProjectDirs::from("com", "Emssion", "ScheduleManager")?;
+    Some(directories.data_local_dir().join("logs").join(format!(
+        "schedule-manager.{}.log",
+        Local::now().format("%Y-%m-%d")
+    )))
+}
+
+fn app_log(message: impl AsRef<str>) {
+    let Some(path) = application_log_path() else {
+        return;
+    };
+    let lock = APPLICATION_LOG_LOCK.get_or_init(|| Mutex::new(()));
+    let Ok(_guard) = lock.lock() else {
+        return;
+    };
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    let _ = writeln!(
+        file,
+        "{} pid={} {}",
+        Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+        std::process::id(),
+        message.as_ref()
+    );
+}
+
+fn install_application_panic_log() {
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        app_log(format!("panic: {panic_info}"));
+        original_hook(panic_info);
+    }));
+}
 
 struct UiState {
     visible_month: NaiveDate,
@@ -39,6 +84,13 @@ struct UiState {
     widget_preview_event_id: Option<String>,
     pending_sync_cursor: Option<i64>,
     sync_in_progress: bool,
+    desktop_drag_origin: Option<DesktopDragOrigin>,
+}
+
+#[derive(Clone, Copy)]
+struct DesktopDragOrigin {
+    cursor: (i32, i32),
+    window: (i32, i32),
 }
 
 #[derive(Clone)]
@@ -54,6 +106,15 @@ struct DesktopWidgetConfig {
     locked: bool,
 }
 
+#[cfg(target_os = "windows")]
+#[derive(Debug, Deserialize)]
+struct ExternalWidgetCommand {
+    action: String,
+    event_id: Option<String>,
+    #[allow(dead_code)]
+    created_at: i64,
+}
+
 impl Default for DesktopWidgetConfig {
     fn default() -> Self {
         Self {
@@ -65,6 +126,15 @@ impl Default for DesktopWidgetConfig {
 }
 
 pub fn run() -> Result<()> {
+    install_application_panic_log();
+    app_log(format!(
+        "application starting version={} exe={} args={:?}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::current_exe()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|error| format!("<unavailable: {error}>")),
+        std::env::args_os().collect::<Vec<_>>()
+    ));
     let mut startup_hidden = std::env::args_os().any(|arg| arg == OsStr::new("--startup-hidden"));
     #[cfg(target_os = "windows")]
     let notification_identity_error = crate::windows_notifications::prepare_identity().err();
@@ -107,6 +177,7 @@ pub fn run() -> Result<()> {
         widget_preview_event_id: None,
         pending_sync_cursor: None,
         sync_in_progress: false,
+        desktop_drag_origin: None,
     }));
     render_all_surfaces(&app, &widget, &state)?;
     #[cfg(target_os = "windows")]
@@ -117,10 +188,14 @@ pub fn run() -> Result<()> {
     wire_desktop_widget_callbacks(&app, &widget, state.clone());
     let _widget_position_timer = start_desktop_widget_position_timer(&widget);
     let _widget_refresh_timer = start_desktop_widget_refresh_timer(&app, &widget, state.clone());
+    #[cfg(target_os = "windows")]
+    let _external_widget_command_timer =
+        start_external_widget_command_timer(&app, &widget, state.clone());
     let _system_tray = match install_system_tray(&app, &widget, state.clone()) {
         Ok(tray) => Some(tray),
         Err(error) => {
             eprintln!("system tray startup failed: {error:#}");
+            app_log(format!("system tray startup failed: {error:#}"));
             startup_hidden = false;
             app.set_close_behavior(-1);
             app.set_status(format!("系统托盘启动失败，请关闭时选择完全退出：{error}").into());
@@ -138,11 +213,14 @@ pub fn run() -> Result<()> {
     {
         sync_in_background(&app, state.clone());
     }
-    if startup_hidden {
-        slint::run_event_loop()?;
-    } else {
-        app.run()?;
+    if !startup_hidden {
+        app.show()?;
     }
+    app_log(format!(
+        "event loop starting startup_hidden={startup_hidden}"
+    ));
+    slint::run_event_loop_until_quit()?;
+    app_log("event loop stopped");
     Ok(())
 }
 
@@ -165,6 +243,7 @@ fn wire_callbacks(app: &AppWindow, widget: &DesktopWidget, state: Arc<Mutex<UiSt
     let weak_widget = widget.as_weak();
     app.on_request_hide_to_tray(move || {
         if let Some(app) = weak.upgrade() {
+            app_log("main window requested hide to tray");
             hide_main_window(&app, weak_widget.upgrade().as_ref());
         }
     });
@@ -177,6 +256,7 @@ fn wire_callbacks(app: &AppWindow, widget: &DesktopWidget, state: Arc<Mutex<UiSt
             return;
         };
         if let Err(error) = dock_to_desktop(&app, &widget, &shared) {
+            app_log(format!("dock to desktop failed: {error:#}"));
             app.set_status(format!("吸附到桌面失败：{error}").into());
         }
     });
@@ -189,6 +269,9 @@ fn wire_callbacks(app: &AppWindow, widget: &DesktopWidget, state: Arc<Mutex<UiSt
             return;
         }
         app.set_exit_pending(true);
+        #[cfg(target_os = "windows")]
+        close_external_desktop_widget();
+        app_log("full exit requested; starting final sync");
         app.set_status("正在同步数据后退出…".into());
         let token = shared.lock().ok().and_then(|state| state.token.clone());
         let weak = app.as_weak();
@@ -197,8 +280,10 @@ fn wire_callbacks(app: &AppWindow, widget: &DesktopWidget, state: Arc<Mutex<UiSt
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(app) = weak.upgrade() else { return };
                 if let Err(error) = sync_result {
+                    app_log(format!("final sync failed: {error:#}"));
                     app.set_status(format!("退出前同步失败：{error}").into());
                 }
+                app_log("final sync completed; quitting event loop");
                 let _ = mark_watcher_intentional_exit();
                 let _ = app.hide();
                 let _ = slint::quit_event_loop();
@@ -874,6 +959,7 @@ fn wire_desktop_widget_callbacks(
             return;
         };
         widget.set_locked(locked);
+        app_log(format!("desktop widget locked={locked}"));
         let mut config = load_desktop_widget_config().unwrap_or_default();
         config.locked = locked;
         if let Some((x, y)) = desktop_widget_position(&widget) {
@@ -884,11 +970,46 @@ fn wire_desktop_widget_callbacks(
     });
 
     let weak_widget = widget.as_weak();
+    let shared = state.clone();
     widget.on_start_drag(move || {
         if let Some(widget) = weak_widget.upgrade()
             && !widget.get_locked()
         {
-            begin_desktop_widget_drag(&widget);
+            app_log("desktop widget drag requested");
+            let origin = begin_desktop_widget_drag(&widget);
+            if let Ok(mut state) = shared.lock() {
+                state.desktop_drag_origin = origin;
+            }
+        }
+    });
+
+    let weak_widget = widget.as_weak();
+    let shared = state.clone();
+    widget.on_drag_move(move || {
+        let Some(widget) = weak_widget.upgrade() else {
+            return;
+        };
+        let origin = shared
+            .lock()
+            .ok()
+            .and_then(|state| state.desktop_drag_origin);
+        if let Some(origin) = origin {
+            continue_desktop_widget_drag(&widget, origin);
+        }
+    });
+
+    let weak_widget = widget.as_weak();
+    let shared = state.clone();
+    widget.on_end_drag(move || {
+        let was_dragging = shared
+            .lock()
+            .map(|mut state| state.desktop_drag_origin.take().is_some())
+            .unwrap_or(false);
+        if was_dragging {
+            app_log("desktop widget drag ended");
+            if let Some(widget) = weak_widget.upgrade() {
+                apply_desktop_widget_window_shape(&widget);
+            }
         }
     });
 
@@ -896,6 +1017,7 @@ fn wire_desktop_widget_callbacks(
     let weak_widget = widget.as_weak();
     widget.on_open_main(move || {
         if let (Some(app), Some(widget)) = (weak_app.upgrade(), weak_widget.upgrade()) {
+            app_log("desktop widget requested main window");
             show_main_window(&app, Some(&widget));
         }
     });
@@ -904,6 +1026,7 @@ fn wire_desktop_widget_callbacks(
     let weak_widget = widget.as_weak();
     widget.on_hide_widget(move || {
         if let Some(widget) = weak_widget.upgrade() {
+            app_log("desktop widget requested hide to tray");
             let _ = widget.hide();
         }
         if let Some(app) = weak_app.upgrade() {
@@ -1943,6 +2066,190 @@ fn desktop_widget_config_path() -> Result<PathBuf> {
     Ok(directories.config_dir().join("desktop-widget.json"))
 }
 
+#[cfg(target_os = "windows")]
+fn external_widget_command_path() -> Result<PathBuf> {
+    let directories = directories::ProjectDirs::from("com", "Emssion", "ScheduleManager")
+        .ok_or_else(|| anyhow!("无法定位本地数据目录"))?;
+    Ok(directories.data_local_dir().join("widget-command.json"))
+}
+
+#[cfg(target_os = "windows")]
+fn take_external_widget_command() -> Result<Option<ExternalWidgetCommand>> {
+    let path = external_widget_command_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let payload =
+        fs::read(&path).with_context(|| format!("无法读取桌面挂件命令：{}", path.display()))?;
+    // Remove first so an invalid or interrupted command cannot be replayed forever.
+    let _ = fs::remove_file(&path);
+    let command = serde_json::from_slice(&payload)
+        .with_context(|| format!("桌面挂件命令格式无效：{}", path.display()))?;
+    Ok(Some(command))
+}
+
+#[cfg(target_os = "windows")]
+fn start_external_widget_command_timer(
+    app: &AppWindow,
+    widget: &DesktopWidget,
+    state: Arc<Mutex<UiState>>,
+) -> Timer {
+    // Do not replay a stale click from a widget that was closed before this launch.
+    if let Ok(path) = external_widget_command_path() {
+        let _ = fs::remove_file(path);
+    }
+    let weak_app = app.as_weak();
+    let weak_widget = widget.as_weak();
+    let timer = Timer::default();
+    timer.start(
+        TimerMode::Repeated,
+        StdDuration::from_millis(150),
+        move || {
+            let Some(app) = weak_app.upgrade() else {
+                return;
+            };
+            let Some(widget) = weak_widget.upgrade() else {
+                return;
+            };
+            let command = match take_external_widget_command() {
+                Ok(Some(command)) => command,
+                Ok(None) => return,
+                Err(error) => {
+                    app_log(format!("external widget command failed: {error:#}"));
+                    return;
+                }
+            };
+            app_log(format!(
+                "external widget command action={} event_id={:?}",
+                command.action, command.event_id
+            ));
+            match command.action.as_str() {
+                "open" => show_main_window(&app, Some(&widget)),
+                "edit" => {
+                    let Some(id) = command.event_id else {
+                        return;
+                    };
+                    if let Ok(mut state) = state.lock() {
+                        state.selected_event_id = Some(id.clone());
+                    }
+                    match load_event_into_editor(&app, &id) {
+                        Ok(()) => {
+                            app.set_editor_visible(true);
+                            show_main_window(&app, Some(&widget));
+                        }
+                        Err(error) => {
+                            show_main_window(&app, Some(&widget));
+                            app.set_status(format!("读取日程失败：{error}").into());
+                        }
+                    }
+                }
+                action => app_log(format!("ignored external widget command action={action}")),
+            }
+        },
+    );
+    timer
+}
+
+#[cfg(target_os = "windows")]
+fn external_desktop_widget_executable() -> Result<PathBuf> {
+    let current = std::env::current_exe().context("无法定位主程序")?;
+    let directory = current.parent().ok_or_else(|| anyhow!("主程序目录无效"))?;
+    Ok(directory.join("schedule-desktop-widget.exe"))
+}
+
+#[cfg(target_os = "windows")]
+fn external_desktop_widget_window() -> Option<windows_sys::Win32::Foundation::HWND> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
+
+    // This title is intentionally different from the legacy hidden Slint
+    // component; matching the old title made docking skip the WGPU process.
+    let title = OsStr::new("Schedule Manager Desktop Widget WGPU")
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let window = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
+    (!window.is_null()).then_some(window)
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_external_desktop_widget(app: &AppWindow) -> Result<()> {
+    if external_desktop_widget_window().is_some() {
+        app_log("external desktop widget already running");
+        return Ok(());
+    }
+    let executable = external_desktop_widget_executable()?;
+    if !executable.is_file() {
+        return Err(anyhow!(
+            "桌面挂件程序不存在：{}；请先运行 scripts/dev.ps1 重新构建",
+            executable.display()
+        ));
+    }
+    let log_path = application_log_path()
+        .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
+        .ok_or_else(|| anyhow!("无法定位挂件日志目录"))?
+        .join(format!(
+            "schedule-desktop-widget.{}.stderr.log",
+            Local::now().format("%Y-%m-%d")
+        ));
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent).context("无法创建挂件日志目录")?;
+    }
+    let stderr = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("无法创建挂件错误日志：{}", log_path.display()))?;
+    let stdout = stderr.try_clone().context("无法复制挂件日志句柄")?;
+    let mut child = Command::new(&executable)
+        .env("RUST_BACKTRACE", "full")
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .with_context(|| format!("无法启动桌面挂件：{}", executable.display()))?;
+    let process_id = child.id();
+    app_log(format!(
+        "external desktop widget started pid={} exe={}",
+        process_id,
+        executable.display()
+    ));
+    let weak_app = app.as_weak();
+    thread::spawn(move || match child.wait() {
+        Ok(status) => {
+            app_log(format!(
+                "external desktop widget exited pid={process_id} status={status}"
+            ));
+            if !status.success() {
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = weak_app.upgrade() {
+                        show_main_window(&app, None);
+                        app.set_status(
+                            format!("桌面挂件异常退出（{status}），主界面已自动恢复").into(),
+                        );
+                    }
+                });
+            }
+        }
+        Err(error) => {
+            app_log(format!(
+                "external desktop widget wait failed pid={process_id}: {error}"
+            ));
+        }
+    });
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn close_external_desktop_widget() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
+    if let Some(window) = external_desktop_widget_window() {
+        unsafe {
+            let _ = PostMessageW(window, WM_CLOSE, 0, 0);
+        }
+        app_log("external desktop widget close requested");
+    }
+}
+
 fn load_desktop_widget_config() -> Result<DesktopWidgetConfig> {
     let path = desktop_widget_config_path()?;
     if !path.exists() {
@@ -1969,31 +2276,69 @@ fn dock_to_desktop(
     widget: &DesktopWidget,
     state: &Arc<Mutex<UiState>>,
 ) -> Result<()> {
-    render_all_surfaces(app, widget, state)?;
-    widget.show()?;
-    configure_desktop_widget_window(widget);
-    app.set_status("日历已吸附到桌面；可从托盘恢复主程序".into());
-    app.hide()?;
-    Ok(())
+    app_log("dock to desktop started");
+    #[cfg(target_os = "windows")]
+    {
+        let _ = state;
+        let _ = widget.hide();
+        spawn_external_desktop_widget(app)?;
+        app.set_status("日历已吸附到桌面；可从托盘恢复主程序".into());
+        app.hide()?;
+        app_log("main window hidden after external widget launch");
+        return Ok(());
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        render_all_surfaces(app, widget, state)?;
+        widget.show()?;
+        app_log("desktop widget show completed");
+        configure_desktop_widget_window(widget);
+        schedule_desktop_widget_window_configuration(widget);
+        app.set_status("日历已吸附到桌面；可从托盘恢复主程序".into());
+        app.hide()?;
+        app_log("main window hidden after docking");
+        Ok(())
+    }
 }
 
+#[cfg(not(target_os = "windows"))]
+fn schedule_desktop_widget_window_configuration(widget: &DesktopWidget) {
+    let weak = widget.as_weak();
+    Timer::single_shot(StdDuration::from_millis(100), move || {
+        if let Some(widget) = weak.upgrade() {
+            app_log("desktop widget configuration retry delay_ms=100");
+            configure_desktop_widget_window(&widget);
+        }
+    });
+    let weak = widget.as_weak();
+    Timer::single_shot(StdDuration::from_millis(750), move || {
+        if let Some(widget) = weak.upgrade() {
+            app_log("desktop widget configuration retry delay_ms=750");
+            configure_desktop_widget_window(&widget);
+        }
+    });
+}
+
+#[cfg(not(target_os = "windows"))]
 fn configure_desktop_widget_window(widget: &DesktopWidget) {
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
-        use slint::winit_030::{WinitWindowAccessor, winit::window::WindowLevel};
+        use slint::winit_030::WinitWindowAccessor;
+        #[cfg(target_os = "macos")]
+        use slint::winit_030::winit::window::WindowLevel;
 
         let config = load_desktop_widget_config().unwrap_or_default();
-        let _ = widget.window().with_winit_window(|window| {
+        let configured = widget.window().with_winit_window(|window| {
+            window.set_decorations(false);
+            window.set_transparent(true);
+            #[cfg(target_os = "macos")]
             window.set_window_level(WindowLevel::AlwaysOnBottom);
             #[cfg(target_os = "windows")]
             {
                 use slint::winit_030::winit::platform::windows::WindowExtWindows;
                 window.set_skip_taskbar(true);
-                if let Err(error) =
-                    window_vibrancy::apply_acrylic(window, Some((247, 244, 240, 190)))
-                {
-                    eprintln!("desktop widget acrylic failed: {error}");
-                }
+                attach_windows_widget_to_desktop(window);
+                apply_windows_widget_shape(window);
             }
             #[cfg(target_os = "macos")]
             if let Err(error) = window_vibrancy::apply_vibrancy(
@@ -2029,6 +2374,14 @@ fn configure_desktop_widget_window(widget: &DesktopWidget) {
                     .set_outer_position(slint::winit_030::winit::dpi::PhysicalPosition::new(x, y));
             }
         });
+        if configured.is_none() {
+            app_log(format!(
+                "desktop widget configuration skipped: winit window unavailable visible={}",
+                widget.window().is_visible()
+            ));
+        } else {
+            app_log("desktop widget configuration completed");
+        }
     }
 }
 
@@ -2075,6 +2428,7 @@ fn start_desktop_widget_position_timer(widget: &DesktopWidget) -> Timer {
             config.locked = widget.get_locked();
             if let Err(error) = save_desktop_widget_config(&config) {
                 eprintln!("desktop widget position save failed: {error:#}");
+                app_log(format!("desktop widget position save failed: {error:#}"));
             }
         },
     );
@@ -2100,16 +2454,309 @@ fn start_desktop_widget_refresh_timer(
     timer
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos"))]
-fn begin_desktop_widget_drag(widget: &DesktopWidget) {
+#[cfg(target_os = "windows")]
+fn begin_desktop_widget_drag(widget: &DesktopWidget) -> Option<DesktopDragOrigin> {
+    use windows_sys::Win32::{Foundation::POINT, UI::WindowsAndMessaging::GetCursorPos};
+
+    let window = desktop_widget_position(widget)?;
+    let mut cursor = POINT::default();
+    if unsafe { GetCursorPos(&mut cursor) } == 0 {
+        app_log("desktop widget drag failed: cursor position unavailable");
+        return None;
+    }
+    app_log(format!(
+        "desktop widget custom drag started cursor={},{} window={},{}",
+        cursor.x, cursor.y, window.0, window.1
+    ));
+    Some(DesktopDragOrigin {
+        cursor: (cursor.x, cursor.y),
+        window,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn begin_desktop_widget_drag(widget: &DesktopWidget) -> Option<DesktopDragOrigin> {
+    use slint::winit_030::WinitWindowAccessor;
+    let result = widget
+        .window()
+        .with_winit_window(|window| window.drag_window());
+    if let Some(Err(error)) = result {
+        app_log(format!("desktop widget native drag failed: {error}"));
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn continue_desktop_widget_drag(widget: &DesktopWidget, origin: DesktopDragOrigin) {
+    use slint::winit_030::{WinitWindowAccessor, winit::dpi::PhysicalPosition};
+    use windows_sys::Win32::{Foundation::POINT, UI::WindowsAndMessaging::GetCursorPos};
+
+    let mut cursor = POINT::default();
+    if unsafe { GetCursorPos(&mut cursor) } == 0 {
+        return;
+    }
+    let x = origin.window.0 + cursor.x - origin.cursor.0;
+    let y = origin.window.1 + cursor.y - origin.cursor.1;
+    let _ = widget
+        .window()
+        .with_winit_window(|window| window.set_outer_position(PhysicalPosition::new(x, y)));
+}
+
+#[cfg(not(target_os = "windows"))]
+fn continue_desktop_widget_drag(_widget: &DesktopWidget, _origin: DesktopDragOrigin) {}
+
+#[cfg(target_os = "windows")]
+fn windows_window_handle(
+    window: &slint::winit_030::winit::window::Window,
+) -> Option<windows_sys::Win32::Foundation::HWND> {
+    use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let handle = window.window_handle().ok()?;
+    match handle.as_raw() {
+        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get() as _),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[allow(dead_code)]
+unsafe extern "system" fn find_desktop_worker_callback(
+    top: windows_sys::Win32::Foundation::HWND,
+    data: windows_sys::Win32::Foundation::LPARAM,
+) -> windows_sys::core::BOOL {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowExW;
+
+    let shell_view = OsStr::new("SHELLDLL_DefView")
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let worker_class = OsStr::new("WorkerW")
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    unsafe {
+        let shell = FindWindowExW(
+            top,
+            std::ptr::null_mut(),
+            shell_view.as_ptr(),
+            std::ptr::null(),
+        );
+        if !shell.is_null() {
+            let worker = FindWindowExW(
+                std::ptr::null_mut(),
+                top,
+                worker_class.as_ptr(),
+                std::ptr::null(),
+            );
+            if !worker.is_null() {
+                *(data as *mut windows_sys::Win32::Foundation::HWND) = worker;
+                return 0;
+            }
+        }
+    }
+    1
+}
+
+#[cfg(target_os = "windows")]
+#[allow(dead_code)]
+fn windows_desktop_worker() -> Option<windows_sys::Win32::Foundation::HWND> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, FindWindowW, SMTO_NORMAL, SendMessageTimeoutW,
+    };
+
+    let progman_class = OsStr::new("Progman")
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    unsafe {
+        let progman = FindWindowW(progman_class.as_ptr(), std::ptr::null());
+        if progman.is_null() {
+            return None;
+        }
+        let mut message_result = 0usize;
+        let _ = SendMessageTimeoutW(
+            progman,
+            0x052c,
+            0x0d,
+            0,
+            SMTO_NORMAL,
+            1000,
+            &mut message_result,
+        );
+        let _ = SendMessageTimeoutW(
+            progman,
+            0x052c,
+            0x0d,
+            1,
+            SMTO_NORMAL,
+            1000,
+            &mut message_result,
+        );
+        let mut worker: windows_sys::Win32::Foundation::HWND = std::ptr::null_mut();
+        let _ = EnumWindows(
+            Some(find_desktop_worker_callback),
+            &mut worker as *mut windows_sys::Win32::Foundation::HWND as isize,
+        );
+        Some(if worker.is_null() { progman } else { worker })
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[allow(dead_code)]
+fn attach_windows_widget_to_desktop(window: &slint::winit_030::winit::window::Window) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GWLP_HWNDPARENT, HWND_BOTTOM, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        SetWindowLongPtrW, SetWindowPos,
+    };
+
+    let (Some(hwnd), Some(worker)) = (windows_window_handle(window), windows_desktop_worker())
+    else {
+        app_log("desktop widget WorkerW attachment unavailable");
+        return;
+    };
+    unsafe {
+        SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, worker as isize);
+        let positioned = SetWindowPos(
+            hwnd,
+            HWND_BOTTOM,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
+        app_log(format!(
+            "desktop widget attached to WorkerW hwnd={hwnd:p} worker={worker:p} positioned={}",
+            positioned != 0
+        ));
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn apply_windows_widget_shape(window: &slint::winit_030::winit::window::Window) {
+    use windows_sys::Win32::{
+        Foundation::RECT,
+        Graphics::{
+            Dwm::{
+                DWMNCRP_DISABLED, DWMWA_BORDER_COLOR, DWMWA_NCRENDERING_POLICY,
+                DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DwmSetWindowAttribute,
+            },
+            Gdi::{CreateRoundRectRgn, DeleteObject, GetWindowRgnBox, RGN_ERROR, SetWindowRgn},
+        },
+        UI::WindowsAndMessaging::{
+            GWL_EXSTYLE, GWL_STYLE, GetWindowLongW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+            SWP_NOSIZE, SWP_NOZORDER, SetWindowLongW, SetWindowPos, WS_BORDER, WS_CHILD,
+            WS_DLGFRAME, WS_EX_CLIENTEDGE, WS_EX_DLGMODALFRAME, WS_EX_NOACTIVATE, WS_EX_STATICEDGE,
+            WS_EX_TOOLWINDOW, WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP,
+            WS_SYSMENU, WS_THICKFRAME,
+        },
+    };
+
+    let Some(hwnd) = windows_window_handle(window) else {
+        app_log("desktop widget native shape failed: HWND unavailable");
+        return;
+    };
+
+    unsafe {
+        let style_before = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+        let frame_style = WS_CHILD
+            | WS_THICKFRAME
+            | WS_BORDER
+            | WS_DLGFRAME
+            | WS_MINIMIZEBOX
+            | WS_MAXIMIZEBOX
+            | WS_SYSMENU;
+        let style_after = (style_before & !frame_style) | WS_POPUP;
+        let ex_style_before = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        let frame_ex_style =
+            WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_STATICEDGE;
+        let ex_style_after =
+            (ex_style_before & !frame_ex_style) | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+        if style_before != style_after {
+            SetWindowLongW(hwnd, GWL_STYLE, style_after as i32);
+        }
+        if ex_style_before != ex_style_after {
+            SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style_after as i32);
+        }
+        if style_before != style_after || ex_style_before != ex_style_after {
+            SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+        }
+
+        let nc_policy = DWMNCRP_DISABLED;
+        let nc_result = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_NCRENDERING_POLICY as u32,
+            &nc_policy as *const i32 as _,
+            std::mem::size_of_val(&nc_policy) as u32,
+        );
+        let corner_preference = DWMWCP_DONOTROUND;
+        let corner_result = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+            &corner_preference as *const i32 as _,
+            std::mem::size_of_val(&corner_preference) as u32,
+        );
+        let border_color = 0xffff_fffeu32;
+        let border_result = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR as u32,
+            &border_color as *const u32 as _,
+            std::mem::size_of_val(&border_color) as u32,
+        );
+
+        let size = window.inner_size();
+        let corner_diameter = (48.0 * window.scale_factor()).round().max(1.0) as i32;
+        let region = CreateRoundRectRgn(
+            0,
+            0,
+            size.width as i32,
+            size.height as i32,
+            corner_diameter,
+            corner_diameter,
+        );
+        let mut applied = 0;
+        if !region.is_null() {
+            applied = SetWindowRgn(hwnd, region, 1);
+            if applied == 0 {
+                DeleteObject(region);
+            }
+        }
+        let mut bounds = RECT::default();
+        let region_kind = GetWindowRgnBox(hwnd, &mut bounds);
+        app_log(format!(
+            "desktop widget native shape hwnd={hwnd:p} style={style_before:#010x}->{style_after:#010x} ex_style={ex_style_before:#010x}->{ex_style_after:#010x} size={}x{} diameter={corner_diameter} region_applied={applied} region_kind={region_kind} nc={nc_result:#010x} corner={corner_result:#010x} border={border_result:#010x}",
+            size.width, size.height
+        ));
+        if region_kind == RGN_ERROR {
+            app_log("desktop widget native shape verification failed: no HRGN installed");
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn apply_desktop_widget_window_shape(widget: &DesktopWidget) {
     use slint::winit_030::WinitWindowAccessor;
     let _ = widget
         .window()
-        .with_winit_window(|window| window.drag_window());
+        .with_winit_window(apply_windows_widget_shape);
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-fn begin_desktop_widget_drag(_widget: &DesktopWidget) {}
+fn begin_desktop_widget_drag(_widget: &DesktopWidget) -> Option<DesktopDragOrigin> {
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+fn apply_desktop_widget_window_shape(_widget: &DesktopWidget) {}
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 struct SystemTray {
@@ -2233,12 +2880,16 @@ fn install_system_tray(
 fn hide_main_window(app: &AppWindow, widget: Option<&DesktopWidget>) {
     app.set_status("已隐藏到系统托盘，双击托盘图标可恢复".into());
     let _ = app.hide();
+    #[cfg(target_os = "windows")]
+    close_external_desktop_widget();
     if let Some(widget) = widget {
         let _ = widget.hide();
     }
 }
 
 fn show_main_window(app: &AppWindow, widget: Option<&DesktopWidget>) {
+    #[cfg(target_os = "windows")]
+    close_external_desktop_widget();
     if let Some(widget) = widget {
         let _ = widget.hide();
     }
