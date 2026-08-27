@@ -600,6 +600,7 @@ fn wire_callbacks(
                             if let Ok(mut state) = shared_thread.lock() {
                                 state.selected_event_id = None;
                             }
+                            app.set_selected_event_id("".into());
                             app.set_editor_visible(false);
                             app.set_status("日程已从云端与本地删除".into());
                             let _ = render_all(&app, &shared_thread);
@@ -616,6 +617,7 @@ fn wire_callbacks(
                     if let Ok(mut state) = shared.lock() {
                         state.selected_event_id = None;
                     }
+                    app.set_selected_event_id("".into());
                     app.set_editor_visible(false);
                     app.set_status("日程已从本机删除，登录后可选择同步".into());
                     let _ = render_all(&app, &shared);
@@ -1353,6 +1355,7 @@ fn load_event_into_editor(app: &AppWindow, id: &str) -> Result<()> {
     let duration = (event.end_at - event.start_at).num_minutes().max(1);
     let kind = schedule_kind(&event);
     let (lunar_month, lunar_day, lunar_leap) = yearly_lunar_parts(&event);
+    app.set_selected_event_id(id.into());
     app.set_event_title(event.title.into());
     app.set_event_schedule_kind(kind.index());
     app.set_event_schedule_label(kind.label().into());
