@@ -13,6 +13,14 @@ pub struct LocalRepository {
     connection: Connection,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingForcedReminder {
+    pub key: String,
+    pub title: String,
+    pub body: String,
+    pub created_at: String,
+}
+
 impl LocalRepository {
     pub fn open() -> Result<Self> {
         let project = ProjectDirs::from("com", "Emssion", "ScheduleManager")
@@ -67,6 +75,18 @@ impl LocalRepository {
                 delivered_at TEXT NOT NULL,
                 PRIMARY KEY(event_id, event_version, occurrence_at, offset_minutes)
             );
+            CREATE TABLE IF NOT EXISTS forced_reminder_pending (
+                reminder_key TEXT PRIMARY KEY,
+                event_id TEXT NOT NULL,
+                event_version INTEGER NOT NULL,
+                occurrence_at TEXT NOT NULL,
+                offset_minutes INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_forced_reminder_pending_created
+                ON forced_reminder_pending(created_at);
             "#,
         )?;
         Ok(())
@@ -279,6 +299,62 @@ impl LocalRepository {
         )?;
         Ok(())
     }
+
+    pub fn enqueue_forced_reminder(
+        &self,
+        event: &CalendarEvent,
+        occurrence_at: DateTime<Utc>,
+        offset_minutes: i64,
+        body: &str,
+        created_at: DateTime<Utc>,
+    ) -> Result<String> {
+        let key = format!(
+            "{}:{}:{}:{}",
+            event.id,
+            event.version,
+            occurrence_at.timestamp_millis(),
+            offset_minutes
+        );
+        self.connection.execute(
+            r#"INSERT OR IGNORE INTO forced_reminder_pending(
+                   reminder_key,event_id,event_version,occurrence_at,offset_minutes,title,body,created_at
+               ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)"#,
+            params![
+                key,
+                event.id,
+                event.version,
+                occurrence_at.to_rfc3339(),
+                offset_minutes,
+                event.title,
+                body,
+                created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(key)
+    }
+
+    pub fn pending_forced_reminders(&self) -> Result<Vec<PendingForcedReminder>> {
+        let mut statement = self.connection.prepare(
+            "SELECT reminder_key,title,body,created_at FROM forced_reminder_pending ORDER BY created_at, reminder_key",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(PendingForcedReminder {
+                key: row.get(0)?,
+                title: row.get(1)?,
+                body: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })?;
+        rows.map(|row| Ok(row?)).collect()
+    }
+
+    pub fn acknowledge_forced_reminder(&self, key: &str) -> Result<()> {
+        self.connection.execute(
+            "DELETE FROM forced_reminder_pending WHERE reminder_key=?1",
+            [key],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -324,6 +400,34 @@ mod tests {
         )
         .unwrap();
         assert!(repo.due_reminders(now).unwrap().is_empty());
+        drop(repo);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn forced_reminders_persist_until_acknowledged() {
+        let path = std::env::temp_dir().join(format!(
+            "schedule-forced-reminder-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let repo = LocalRepository::open_at(path.clone()).unwrap();
+        let occurrence = Utc::now();
+        let mut event = CalendarEvent::draft(occurrence, occurrence + Duration::minutes(30));
+        event.title = "必须处理".into();
+        event.force_reminder = true;
+        let key = repo
+            .enqueue_forced_reminder(&event, occurrence, 0, "今天开始", occurrence)
+            .unwrap();
+        repo.enqueue_forced_reminder(&event, occurrence, 0, "今天开始", occurrence)
+            .unwrap();
+
+        let pending = repo.pending_forced_reminders().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].key, key);
+        assert_eq!(pending[0].title, "必须处理");
+
+        repo.acknowledge_forced_reminder(&key).unwrap();
+        assert!(repo.pending_forced_reminders().unwrap().is_empty());
         drop(repo);
         let _ = std::fs::remove_file(path);
     }

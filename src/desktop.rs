@@ -12,9 +12,12 @@ use anyhow::{Context, Result, anyhow};
 use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime, TimeZone, Timelike, Utc, Weekday};
 use chrono_tz::Asia::Shanghai;
 use serde::{Deserialize, Serialize};
-use slint::{Color, ComponentHandle, ModelRc, Timer, TimerMode, VecModel};
+use slint::winit_030::WinitWindowAccessor;
+use slint::{CloseRequestResponse, Color, ComponentHandle, ModelRc, Timer, TimerMode, VecModel};
 #[cfg(target_os = "windows")]
 use std::process::{Command, Output, Stdio};
+#[cfg(target_os = "windows")]
+use std::sync::atomic::{AtomicIsize, Ordering};
 #[cfg(target_os = "macos")]
 use std::{cell::RefCell, rc::Rc, time::Instant};
 use std::{
@@ -144,6 +147,8 @@ pub fn run() -> Result<()> {
     let token = email.as_deref().and_then(load_token);
     let app = AppWindow::new()?;
     let widget = DesktopWidget::new()?;
+    let forced_reminder = ForcedReminderWindow::new()?;
+    configure_forced_reminder_window(&forced_reminder);
     let widget_config = load_desktop_widget_config().unwrap_or_default();
     widget.set_locked(widget_config.locked);
     let close_behavior = repository
@@ -184,8 +189,9 @@ pub fn run() -> Result<()> {
     if let Some(error) = notification_identity_error {
         app.set_status(format!("Windows 通知身份注册失败，将使用兼容模式：{error}").into());
     }
-    wire_callbacks(&app, &widget, state.clone());
+    wire_callbacks(&app, &widget, &forced_reminder, state.clone());
     wire_desktop_widget_callbacks(&app, &widget, state.clone());
+    wire_forced_reminder_callbacks(&app, &forced_reminder);
     let _widget_position_timer = start_desktop_widget_position_timer(&widget);
     let _widget_refresh_timer = start_desktop_widget_refresh_timer(&app, &widget, state.clone());
     #[cfg(target_os = "windows")]
@@ -202,7 +208,7 @@ pub fn run() -> Result<()> {
             None
         }
     };
-    start_reminder_timer(&app);
+    start_reminder_timer(&app, &forced_reminder);
     start_sync_timer(&app, state.clone());
     refresh_holidays_in_background(&app, state.clone());
     if state
@@ -224,7 +230,12 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-fn wire_callbacks(app: &AppWindow, widget: &DesktopWidget, state: Arc<Mutex<UiState>>) {
+fn wire_callbacks(
+    app: &AppWindow,
+    widget: &DesktopWidget,
+    forced_reminder: &ForcedReminderWindow,
+    state: Arc<Mutex<UiState>>,
+) {
     let weak = app.as_weak();
     app.on_choose_close_action(move |behavior| {
         let Some(app) = weak.upgrade() else { return };
@@ -262,10 +273,21 @@ fn wire_callbacks(app: &AppWindow, widget: &DesktopWidget, state: Arc<Mutex<UiSt
     });
 
     let weak = app.as_weak();
+    let weak_forced_reminder = forced_reminder.as_weak();
     let shared = state.clone();
     app.on_request_full_exit(move || {
         let Some(app) = weak.upgrade() else { return };
         if app.get_exit_pending() {
+            return;
+        }
+        let pending_forced = LocalRepository::open()
+            .and_then(|repo| repo.pending_forced_reminders())
+            .unwrap_or_default();
+        if !pending_forced.is_empty() {
+            if let Some(forced_reminder) = weak_forced_reminder.upgrade() {
+                let _ = refresh_forced_reminder_window(&forced_reminder);
+            }
+            app.set_status("仍有强制提醒未处理，请先在提醒窗口点击“已处理”".into());
             return;
         }
         app.set_exit_pending(true);
@@ -466,10 +488,17 @@ fn wire_callbacks(app: &AppWindow, widget: &DesktopWidget, state: Arc<Mutex<UiSt
     let shared = state.clone();
     app.on_save_event(move || {
         let Some(app) = weak.upgrade() else { return };
+        if app.get_event_saving() {
+            return;
+        }
+        app.set_editor_feedback("".into());
+        app.set_editor_feedback_error(false);
         match event_from_editor(&app, &shared) {
             Ok(event) => {
                 let token = shared.lock().ok().and_then(|state| state.token.clone());
                 if let Some(token) = token {
+                    app.set_event_saving(true);
+                    app.set_editor_feedback("正在保存到云端…".into());
                     app.set_status("正在保存到云端…".into());
                     let weak = app.as_weak();
                     let shared_thread = shared.clone();
@@ -482,6 +511,7 @@ fn wire_callbacks(app: &AppWindow, widget: &DesktopWidget, state: Arc<Mutex<UiSt
                             });
                         let _ = slint::invoke_from_event_loop(move || {
                             let Some(app) = weak.upgrade() else { return };
+                            app.set_event_saving(false);
                             match result {
                                 Ok(remote) => {
                                     if let Ok(mut state) = shared_thread.lock() {
@@ -491,27 +521,43 @@ fn wire_callbacks(app: &AppWindow, widget: &DesktopWidget, state: Arc<Mutex<UiSt
                                     app.set_status("日程已保存，云端与本地一致".into());
                                     let _ = render_all(&app, &shared_thread);
                                 }
-                                Err(error) => app.set_status(
-                                    format!("云端保存失败，本地未修改：{error}").into(),
-                                ),
+                                Err(error) => {
+                                    let message = format!("云端保存失败，本地未修改：{error}");
+                                    app.set_editor_feedback(message.clone().into());
+                                    app.set_editor_feedback_error(true);
+                                    app.set_status(message.into());
+                                }
                             }
                         });
                     });
                 } else {
+                    app.set_event_saving(true);
                     match LocalRepository::open().and_then(|repo| repo.upsert_event(&event)) {
                         Ok(()) => {
                             if let Ok(mut state) = shared.lock() {
                                 state.selected_event_id = Some(event.id);
                             }
+                            app.set_event_saving(false);
                             app.set_editor_visible(false);
                             app.set_status("日程已保存到本机，登录后可选择同步".into());
                             let _ = render_all(&app, &shared);
                         }
-                        Err(error) => app.set_status(format!("保存失败：{error}").into()),
+                        Err(error) => {
+                            app.set_event_saving(false);
+                            let message = format!("保存失败：{error}");
+                            app.set_editor_feedback(message.clone().into());
+                            app.set_editor_feedback_error(true);
+                            app.set_status(message.into());
+                        }
                     }
                 }
             }
-            Err(error) => app.set_status(format!("无法保存：{error}").into()),
+            Err(error) => {
+                let message = format!("无法保存：{error}");
+                app.set_editor_feedback(message.clone().into());
+                app.set_editor_feedback_error(true);
+                app.set_status(message.into());
+            }
         }
     });
 
@@ -1285,6 +1331,9 @@ fn overview_event_row(event: &CalendarEvent) -> EventRow {
     if !reminder.is_empty() {
         meta.push(reminder);
     }
+    if event.force_reminder {
+        meta.push("强制提醒".into());
+    }
     EventRow {
         id: event.id.clone().into(),
         date: date.into(),
@@ -1344,8 +1393,12 @@ fn load_event_into_editor(app: &AppWindow, id: &str) -> Result<()> {
             .iter()
             .any(|value| !matches!(*value, 0 | 10 | 60 | 1_440)),
     );
+    app.set_event_force_reminder(event.force_reminder);
     app.set_event_all_day(event.all_day);
     app.set_event_completed(event.completed);
+    app.set_event_saving(false);
+    app.set_editor_feedback("".into());
+    app.set_editor_feedback_error(false);
     Ok(())
 }
 
@@ -1372,8 +1425,12 @@ fn clear_editor(app: &AppWindow, date: NaiveDate) {
     app.set_reminder_1d(false);
     app.set_event_custom_reminder("".into());
     app.set_reminder_custom_applied(false);
+    app.set_event_force_reminder(false);
     app.set_event_all_day(false);
     app.set_event_completed(false);
+    app.set_event_saving(false);
+    app.set_editor_feedback("".into());
+    app.set_editor_feedback_error(false);
 }
 
 fn event_from_editor(app: &AppWindow, state: &Arc<Mutex<UiState>>) -> Result<CalendarEvent> {
@@ -1464,6 +1521,7 @@ fn event_from_editor(app: &AppWindow, state: &Arc<Mutex<UiState>>) -> Result<Cal
     };
     event.completed = app.get_event_completed();
     event.reminder_minutes = reminders;
+    event.force_reminder = app.get_event_force_reminder();
     event.updated_seq = 0;
     event.updated_at = Utc::now();
     Ok(event)
@@ -1614,7 +1672,15 @@ fn sync_event_summary(event: Option<&CalendarEvent>) -> String {
         } else {
             &event.location
         },
-        reminder_summary(&event.reminder_minutes)
+        format!(
+            "{}{}",
+            reminder_summary(&event.reminder_minutes),
+            if event.force_reminder {
+                "（强制提醒）"
+            } else {
+                ""
+            }
+        )
     )
 }
 
@@ -1629,6 +1695,7 @@ fn event_content_equal(left: &CalendarEvent, right: &CalendarEvent) -> bool {
         && left.color == right.color
         && left.recurrence_rule == right.recurrence_rule
         && left.reminder_minutes == right.reminder_minutes
+        && left.force_reminder == right.force_reminder
         && left.completed == right.completed
         && left.deleted == right.deleted
 }
@@ -1654,6 +1721,10 @@ mod sync_tests {
         let left = CalendarEvent::draft(start, start + Duration::hours(1));
         let mut right = left.clone();
         right.title = "云端标题".into();
+        assert!(!event_content_equal(&left, &right));
+
+        let mut right = left.clone();
+        right.force_reminder = true;
         assert!(!event_content_equal(&left, &right));
     }
 }
@@ -1700,19 +1771,373 @@ fn start_sync_timer(app: &AppWindow, state: Arc<Mutex<UiState>>) {
     std::mem::forget(timer);
 }
 
-fn start_reminder_timer(app: &AppWindow) {
-    deliver_due_reminders(app);
+fn configure_forced_reminder_window(reminder: &ForcedReminderWindow) {
+    reminder
+        .window()
+        .on_close_requested(|| CloseRequestResponse::KeepWindowShown);
+    #[cfg(target_os = "windows")]
+    let _ = reminder
+        .window()
+        .with_winit_window(configure_windows_forced_reminder_window);
+}
+
+#[cfg(target_os = "windows")]
+static FORCED_REMINDER_ORIGINAL_WNDPROC: AtomicIsize = AtomicIsize::new(0);
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn forced_reminder_frameless_wndproc(
+    window: windows_sys::Win32::Foundation::HWND,
+    message: u32,
+    wparam: windows_sys::Win32::Foundation::WPARAM,
+    lparam: windows_sys::Win32::Foundation::LPARAM,
+) -> windows_sys::Win32::Foundation::LRESULT {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CallWindowProcW, DefWindowProcW, GWL_EXSTYLE, GWL_STYLE, STYLESTRUCT, WM_NCACTIVATE,
+        WM_NCCALCSIZE, WM_NCPAINT, WM_STYLECHANGING, WNDPROC, WS_BORDER, WS_CAPTION, WS_CHILD,
+        WS_DLGFRAME, WS_EX_CLIENTEDGE, WS_EX_DLGMODALFRAME, WS_EX_NOACTIVATE, WS_EX_STATICEDGE,
+        WS_EX_TOOLWINDOW, WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
+        WS_THICKFRAME,
+    };
+
+    match message {
+        WM_NCCALCSIZE | WM_NCPAINT => return 0,
+        WM_NCACTIVATE => return 1,
+        WM_STYLECHANGING if lparam != 0 => unsafe {
+            let style = &mut *(lparam as *mut STYLESTRUCT);
+            if wparam as i32 == GWL_STYLE {
+                let frame = WS_CHILD
+                    | WS_CAPTION
+                    | WS_THICKFRAME
+                    | WS_BORDER
+                    | WS_DLGFRAME
+                    | WS_MINIMIZEBOX
+                    | WS_MAXIMIZEBOX
+                    | WS_SYSMENU;
+                style.styleNew = (style.styleNew & !frame) | WS_POPUP;
+            } else if wparam as i32 == GWL_EXSTYLE {
+                let frame =
+                    WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_STATICEDGE;
+                style.styleNew = (style.styleNew & !frame) | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+            }
+        },
+        _ => {}
+    }
+
+    let original = FORCED_REMINDER_ORIGINAL_WNDPROC.load(Ordering::Acquire);
+    if original == 0 {
+        unsafe { DefWindowProcW(window, message, wparam, lparam) }
+    } else {
+        let procedure: WNDPROC = unsafe { std::mem::transmute(original) };
+        unsafe { CallWindowProcW(procedure, window, message, wparam, lparam) }
+    }
+}
+
+#[cfg(target_os = "windows")]
+unsafe fn install_forced_reminder_frameless_wndproc(window: windows_sys::Win32::Foundation::HWND) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GWLP_WNDPROC, SetWindowLongPtrW};
+
+    if FORCED_REMINDER_ORIGINAL_WNDPROC.load(Ordering::Acquire) != 0 {
+        return;
+    }
+    let previous = unsafe {
+        SetWindowLongPtrW(
+            window,
+            GWLP_WNDPROC,
+            forced_reminder_frameless_wndproc as *const () as isize,
+        )
+    };
+    if previous != 0 {
+        FORCED_REMINDER_ORIGINAL_WNDPROC.store(previous, Ordering::Release);
+        app_log(format!(
+            "forced reminder frameless wndproc installed hwnd={window:p}"
+        ));
+    } else {
+        app_log(format!(
+            "forced reminder frameless wndproc installation failed hwnd={window:p}"
+        ));
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn configure_windows_forced_reminder_window(window: &slint::winit_030::winit::window::Window) {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::Graphics::{
+        Dwm::{
+            DWMNCRP_DISABLED, DWMWA_BORDER_COLOR, DWMWA_NCRENDERING_POLICY,
+            DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DwmSetWindowAttribute,
+        },
+        Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn},
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GWL_STYLE, GetClientRect, GetWindowLongW, HWND_TOPMOST, SWP_FRAMECHANGED,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowLongW, SetWindowPos, WS_BORDER,
+        WS_CAPTION, WS_CHILD, WS_DLGFRAME, WS_EX_CLIENTEDGE, WS_EX_DLGMODALFRAME, WS_EX_NOACTIVATE,
+        WS_EX_STATICEDGE, WS_EX_TOOLWINDOW, WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+        WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+    };
+
+    use slint::winit_030::winit::platform::windows::WindowExtWindows;
+    window.set_decorations(false);
+    window.set_skip_taskbar(true);
+
+    let Some(hwnd) = windows_window_handle(window) else {
+        return;
+    };
+    unsafe {
+        install_forced_reminder_frameless_wndproc(hwnd);
+        let style_before = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+        let frame_style = WS_CHILD
+            | WS_CAPTION
+            | WS_THICKFRAME
+            | WS_BORDER
+            | WS_DLGFRAME
+            | WS_MINIMIZEBOX
+            | WS_MAXIMIZEBOX
+            | WS_SYSMENU;
+        let style_after = (style_before & !frame_style) | WS_POPUP;
+        let ex_style_before = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        let frame_ex_style =
+            WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_STATICEDGE;
+        let ex_style_after =
+            (ex_style_before & !frame_ex_style) | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+        if style_before != style_after {
+            SetWindowLongW(hwnd, GWL_STYLE, style_after as i32);
+        }
+        if ex_style_before != ex_style_after {
+            SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style_after as i32);
+        }
+
+        let nc_policy = DWMNCRP_DISABLED;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_NCRENDERING_POLICY as u32,
+            &nc_policy as *const i32 as _,
+            std::mem::size_of_val(&nc_policy) as u32,
+        );
+        let corner_preference = DWMWCP_DONOTROUND;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+            &corner_preference as *const i32 as _,
+            std::mem::size_of_val(&corner_preference) as u32,
+        );
+        let border_color = 0xffff_fffeu32;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR as u32,
+            &border_color as *const u32 as _,
+            std::mem::size_of_val(&border_color) as u32,
+        );
+
+        SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
+        let mut client = RECT::default();
+        if GetClientRect(hwnd, &mut client) != 0 && client.right > 0 && client.bottom > 0 {
+            let region = CreateRoundRectRgn(0, 0, client.right, client.bottom, 36, 36);
+            if !region.is_null() && SetWindowRgn(hwnd, region, 1) == 0 {
+                DeleteObject(region);
+            }
+        }
+    }
+}
+
+fn position_forced_reminder_window(reminder: &ForcedReminderWindow) {
+    use slint::winit_030::winit::dpi::PhysicalPosition;
+
+    let _ = reminder.window().with_winit_window(|window| {
+        let Some(monitor) = window
+            .current_monitor()
+            .or_else(|| window.available_monitors().next())
+        else {
+            return;
+        };
+        let monitor_position = monitor.position();
+        let monitor_size = monitor.size();
+        let window_size = window.outer_size();
+        let margin = 24i32;
+        let x = monitor_position.x + monitor_size.width.saturating_sub(window_size.width) as i32
+            - margin;
+        let y = monitor_position.y + margin;
+        window.set_outer_position(PhysicalPosition::new(x, y));
+        #[cfg(target_os = "windows")]
+        configure_windows_forced_reminder_window(window);
+    });
+}
+
+fn refresh_forced_reminder_window(reminder: &ForcedReminderWindow) -> Result<bool> {
+    let pending = LocalRepository::open()?.pending_forced_reminders()?;
+    let Some(current) = pending.first() else {
+        reminder.hide()?;
+        return Ok(false);
+    };
+    reminder.set_reminder_key(current.key.clone().into());
+    reminder.set_reminder_title(current.title.clone().into());
+    reminder.set_reminder_body(current.body.clone().into());
+    reminder.set_pending_count(pending.len().min(i32::MAX as usize) as i32);
+    if !reminder.window().is_visible() {
+        reminder.show()?;
+        position_forced_reminder_window(reminder);
+        app_log(format!(
+            "forced reminder shown key={} pending_count={}",
+            current.key,
+            pending.len()
+        ));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use slint::winit_030::WinitWindowAccessor;
+        let _ = reminder
+            .window()
+            .with_winit_window(configure_windows_forced_reminder_window);
+    }
+    Ok(true)
+}
+
+fn wire_forced_reminder_callbacks(app: &AppWindow, reminder: &ForcedReminderWindow) {
+    let drag_origin = Arc::new(Mutex::new(None::<DesktopDragOrigin>));
+    let weak_reminder = reminder.as_weak();
+    let drag_origin_for_start = drag_origin.clone();
+    reminder.on_start_drag(move || {
+        let Some(reminder) = weak_reminder.upgrade() else {
+            return;
+        };
+        let origin = begin_forced_reminder_drag(&reminder);
+        if let Ok(mut current) = drag_origin_for_start.lock() {
+            *current = origin;
+        }
+    });
+
+    let weak_reminder = reminder.as_weak();
+    let drag_origin_for_move = drag_origin.clone();
+    reminder.on_drag_move(move || {
+        let Some(reminder) = weak_reminder.upgrade() else {
+            return;
+        };
+        let origin = drag_origin_for_move.lock().ok().and_then(|value| *value);
+        if let Some(origin) = origin {
+            continue_forced_reminder_drag(&reminder, origin);
+        }
+    });
+
+    reminder.on_end_drag(move || {
+        if let Ok(mut current) = drag_origin.lock() {
+            *current = None;
+        }
+    });
+
+    let weak_app = app.as_weak();
+    let weak_reminder = reminder.as_weak();
+    reminder.on_acknowledged(move || {
+        let (Some(app), Some(reminder)) = (weak_app.upgrade(), weak_reminder.upgrade()) else {
+            return;
+        };
+        let key = reminder.get_reminder_key().to_string();
+        let result = (|| -> Result<bool> {
+            if key.is_empty() {
+                return refresh_forced_reminder_window(&reminder);
+            }
+            LocalRepository::open()?.acknowledge_forced_reminder(&key)?;
+            app_log(format!("forced reminder acknowledged key={key}"));
+            refresh_forced_reminder_window(&reminder)
+        })();
+        match result {
+            Ok(true) => app.set_status("已处理一条强制提醒，正在显示下一条".into()),
+            Ok(false) => app.set_status("强制提醒已处理".into()),
+            Err(error) => app.set_status(format!("处理强制提醒失败：{error}").into()),
+        }
+    });
+}
+
+#[cfg(target_os = "windows")]
+fn forced_reminder_window_position(reminder: &ForcedReminderWindow) -> Option<(i32, i32)> {
+    use slint::winit_030::WinitWindowAccessor;
+    reminder
+        .window()
+        .with_winit_window(|window| {
+            window
+                .outer_position()
+                .ok()
+                .map(|position| (position.x, position.y))
+        })
+        .flatten()
+}
+
+#[cfg(target_os = "windows")]
+fn begin_forced_reminder_drag(reminder: &ForcedReminderWindow) -> Option<DesktopDragOrigin> {
+    use windows_sys::Win32::{Foundation::POINT, UI::WindowsAndMessaging::GetCursorPos};
+
+    let window = forced_reminder_window_position(reminder)?;
+    let mut cursor = POINT::default();
+    if unsafe { GetCursorPos(&mut cursor) } == 0 {
+        app_log("forced reminder drag failed: cursor position unavailable");
+        return None;
+    }
+    Some(DesktopDragOrigin {
+        cursor: (cursor.x, cursor.y),
+        window,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn begin_forced_reminder_drag(reminder: &ForcedReminderWindow) -> Option<DesktopDragOrigin> {
+    use slint::winit_030::WinitWindowAccessor;
+    let _ = reminder
+        .window()
+        .with_winit_window(|window| window.drag_window());
+    None
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn begin_forced_reminder_drag(_reminder: &ForcedReminderWindow) -> Option<DesktopDragOrigin> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn continue_forced_reminder_drag(reminder: &ForcedReminderWindow, origin: DesktopDragOrigin) {
+    use slint::winit_030::{WinitWindowAccessor, winit::dpi::PhysicalPosition};
+    use windows_sys::Win32::{Foundation::POINT, UI::WindowsAndMessaging::GetCursorPos};
+
+    let mut cursor = POINT::default();
+    if unsafe { GetCursorPos(&mut cursor) } == 0 {
+        return;
+    }
+    let x = origin.window.0 + cursor.x - origin.cursor.0;
+    let y = origin.window.1 + cursor.y - origin.cursor.1;
+    let _ = reminder
+        .window()
+        .with_winit_window(|window| window.set_outer_position(PhysicalPosition::new(x, y)));
+}
+
+#[cfg(not(target_os = "windows"))]
+fn continue_forced_reminder_drag(_reminder: &ForcedReminderWindow, _origin: DesktopDragOrigin) {}
+
+fn start_reminder_timer(app: &AppWindow, forced_reminder: &ForcedReminderWindow) {
+    if let Err(error) = refresh_forced_reminder_window(forced_reminder) {
+        app.set_status(format!("恢复强制提醒失败：{error}").into());
+    }
+    deliver_due_reminders(app, forced_reminder);
     let timer = Timer::default();
     let weak = app.as_weak();
+    let weak_forced_reminder = forced_reminder.as_weak();
     timer.start(TimerMode::Repeated, StdDuration::from_secs(30), move || {
-        if let Some(app) = weak.upgrade() {
-            deliver_due_reminders(&app);
-        }
+        let (Some(app), Some(forced_reminder)) = (weak.upgrade(), weak_forced_reminder.upgrade())
+        else {
+            return;
+        };
+        let _ = refresh_forced_reminder_window(&forced_reminder);
+        deliver_due_reminders(&app, &forced_reminder);
     });
     std::mem::forget(timer);
 }
 
-fn deliver_due_reminders(app: &AppWindow) {
+fn deliver_due_reminders(app: &AppWindow, forced_reminder: &ForcedReminderWindow) {
     let Ok(repo) = LocalRepository::open() else {
         return;
     };
@@ -1736,6 +2161,29 @@ fn deliver_due_reminders(app: &AppWindow) {
         } else {
             format!("{when} 开始 · 提前{}提醒", human_offset(offset))
         };
+        if event.force_reminder {
+            let queued = repo
+                .enqueue_forced_reminder(&event, occurrence, offset, &body, now)
+                .and_then(|_| {
+                    repo.mark_reminder_delivered(&event.id, event.version, occurrence, offset, now)
+                });
+            match queued {
+                Ok(()) => {
+                    if let Err(error) = refresh_forced_reminder_window(forced_reminder) {
+                        app.set_status(
+                            format!("显示强制提醒失败，将在下次启动恢复：{error}").into(),
+                        );
+                    } else {
+                        let _ = show_system_notification(&event.title, &body, sound_enabled);
+                        app.set_status(format!("强制提醒：{} · {}", event.title, body).into());
+                    }
+                }
+                Err(error) => {
+                    app.set_status(format!("记录强制提醒失败，将自动重试：{error}").into())
+                }
+            }
+            continue;
+        }
         match show_system_notification(&event.title, &body, sound_enabled) {
             Ok(()) => match repo.mark_reminder_delivered(
                 &event.id,

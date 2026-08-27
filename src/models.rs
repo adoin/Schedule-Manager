@@ -23,6 +23,8 @@ pub struct CalendarEvent {
     #[serde(default = "default_reminders")]
     pub reminder_minutes: Vec<i64>,
     #[serde(default)]
+    pub force_reminder: bool,
+    #[serde(default)]
     pub completed: bool,
     #[serde(default)]
     pub deleted: bool,
@@ -59,6 +61,7 @@ impl CalendarEvent {
             color: default_color(),
             recurrence_rule: String::new(),
             reminder_minutes: default_reminders(),
+            force_reminder: false,
             completed: false,
             deleted: false,
             version: 0,
@@ -107,4 +110,18 @@ pub struct SyncPullData {
     pub events: Vec<CalendarEvent>,
     pub holidays: Vec<Holiday>,
     pub cursor: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn older_event_payloads_default_to_normal_reminders() {
+        let now = Utc::now();
+        let mut payload = serde_json::to_value(CalendarEvent::draft(now, now)).unwrap();
+        payload.as_object_mut().unwrap().remove("forceReminder");
+        let event: CalendarEvent = serde_json::from_value(payload).unwrap();
+        assert!(!event.force_reminder);
+    }
 }

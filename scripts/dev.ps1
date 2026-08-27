@@ -28,6 +28,22 @@ New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
 Remove-Item -LiteralPath $exitSentinel -Force -ErrorAction SilentlyContinue
 $env:SCHEDULE_WATCHER_EXIT_SENTINEL = $exitSentinel
 
+# Prevent multiple watcher terminals from racing to stop/build/start the same
+# debug executable. A second invocation exits without touching the active one.
+$watcherMutex = New-Object System.Threading.Mutex($false, "Local\ScheduleManagerDevWatcher")
+$watcherMutexOwned = $false
+try {
+    $watcherMutexOwned = $watcherMutex.WaitOne(0, $false)
+}
+catch [System.Threading.AbandonedMutexException] {
+    $watcherMutexOwned = $true
+}
+if (-not $watcherMutexOwned) {
+    Write-Host "[dev] another Schedule Manager watcher is already running; this window will exit." -ForegroundColor Yellow
+    $watcherMutex.Dispose()
+    exit 0
+}
+
 # openssl-src needs a complete Perl distribution on a clean Windows build.
 $strawberryPerl = "C:\Strawberry\perl\bin\perl.exe"
 if (Test-Path -LiteralPath $strawberryPerl) {
@@ -147,6 +163,28 @@ function Build-App {
     return $true
 }
 
+function Test-AppBuild {
+    Write-DevLog "cargo check --bins (keep current app running)"
+    Push-Location $root
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & cargo check --bins >> $stdoutLog 2>> $stderrLog
+        $checkExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        Pop-Location
+    }
+
+    if ($checkExitCode -ne 0) {
+        Write-DevLog "check failed: exit $checkExitCode; current app remains running" -Level "ERROR"
+        return $false
+    }
+
+    return $true
+}
+
 function Start-MainWindow {
     if ($NoLaunch) {
         Write-DevLog "NoLaunch enabled; build completed without starting the app"
@@ -203,8 +241,15 @@ function Test-MainWindowExit {
 
 function Restart-DevApp {
     $script:crashRestartTimes = @()
+    if (-not (Test-AppBuild)) {
+        return
+    }
     Stop-MainWindow
     if (Build-App) {
+        $script:mainProcess = Start-MainWindow
+    }
+    elseif (Test-Path -LiteralPath $mainExe) {
+        Write-DevLog "build failed after validation; restart last successful executable" -Level "WARN"
         $script:mainProcess = Start-MainWindow
     }
 }
@@ -271,4 +316,8 @@ finally {
     if ($currentPidText -eq "$PID") {
         Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
     }
+    if ($watcherMutexOwned) {
+        $watcherMutex.ReleaseMutex()
+    }
+    $watcherMutex.Dispose()
 }

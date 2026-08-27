@@ -63,8 +63,10 @@ component SoftButton inherits Rectangle {
     in property <string> label;
     in property <bool> emphasized: false;
     in property <bool> danger: false;
+    in property <bool> enabled: true;
     callback clicked();
     height: 34px;
+    opacity: root.enabled ? 1 : 0.55;
     background: root.emphasized ? Theme.accent : (touch.has-hover ? Theme.island-active : Theme.island-soft);
     border-width: 0px;
     border-radius: 10px;
@@ -79,7 +81,7 @@ component SoftButton inherits Rectangle {
         horizontal-alignment: center;
         vertical-alignment: center;
     }
-    touch := TouchArea { clicked => { root.clicked(); } }
+    touch := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
 }
 
 component Field inherits Rectangle {
@@ -250,19 +252,23 @@ component Toggle inherits Rectangle {
     callback toggled();
     height: 30px;
     background: transparent;
-    HorizontalLayout {
-        spacing: 8px;
+    opacity: root.enabled ? 1 : 0.55;
+    Rectangle {
+        x: 0px; y: (root.height - self.height) / 2;
+        width: 30px; height: 18px;
+        background: root.checked ? Theme.accent : Theme.island-soft;
+        border-radius: 9px;
         Rectangle {
-            width: 30px; height: 18px;
-            background: root.checked ? Theme.accent : Theme.island-soft;
-            border-radius: 9px;
-            Rectangle {
-                x: root.checked ? 14px : 2px; y: 2px; width: 14px; height: 14px;
-                background: Theme.accent-ink; border-radius: 7px;
-                animate x { duration: 150ms; }
-            }
+            x: root.checked ? 14px : 2px; y: 2px; width: 14px; height: 14px;
+            background: Theme.accent-ink; border-radius: 7px;
+            animate x { duration: 150ms; }
         }
-        Text { text: root.label; color: Theme.ink; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
+    }
+    Text {
+        x: 38px; y: 0px;
+        width: root.width - 38px; height: root.height;
+        text: root.label; color: Theme.ink; font-size: 12px;
+        vertical-alignment: center;
     }
     TouchArea { enabled: root.enabled; clicked => { root.checked = !root.checked; root.toggled(); } }
 }
@@ -611,6 +617,102 @@ export component DesktopWidget inherits Window {
     }
 }
 
+export component ForcedReminderWindow inherits Window {
+    title: "Schedule Manager · 强制提醒";
+    icon: @image-url("../assets/schedule-logo-64.png");
+    default-font-family: "Microsoft YaHei UI";
+    no-frame: true;
+    always-on-top: true;
+    preferred-width: 410px;
+    preferred-height: 238px;
+    min-width: 410px;
+    max-width: 410px;
+    min-height: 238px;
+    max-height: 238px;
+    background: transparent;
+
+    in-out property <string> reminder-key;
+    in-out property <string> reminder-title;
+    in-out property <string> reminder-body;
+    in-out property <int> pending-count: 1;
+    callback acknowledged();
+    callback start-drag();
+    callback drag-move();
+    callback end-drag();
+
+    Rectangle {
+        x: 10px; y: 10px; width: parent.width - 20px; height: parent.height - 20px;
+        background: Theme.island;
+        border-width: 1px;
+        border-color: Theme.accent-soft;
+        border-radius: 18px;
+        drop-shadow-offset-y: 7px;
+        drop-shadow-blur: 20px;
+        drop-shadow-color: Theme.shadow;
+
+        VerticalLayout {
+            padding: 18px; spacing: 10px;
+            Rectangle {
+                height: 30px; background: transparent;
+                HorizontalLayout {
+                    spacing: 9px;
+                    Rectangle {
+                        width: 30px; height: 30px;
+                        background: Theme.accent;
+                        border-radius: 9px;
+                        Text {
+                            text: "!";
+                            color: Theme.accent-ink;
+                            font-size: 18px; font-weight: 900;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                    }
+                    Text {
+                        text: "强制提醒";
+                        color: Theme.ink; font-size: 16px; font-weight: 800;
+                        vertical-alignment: center; horizontal-stretch: 1;
+                    }
+                    Text {
+                        visible: root.pending-count > 1;
+                        text: "待处理 " + root.pending-count;
+                        color: Theme.accent-deep; font-size: 10px;
+                        vertical-alignment: center;
+                    }
+                }
+                TouchArea {
+                    x: 0px; y: 0px; width: parent.width; height: parent.height;
+                    mouse-cursor: move;
+                    pointer-event(event) => {
+                        if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                            root.start-drag();
+                        } else if (event.kind == PointerEventKind.move) {
+                            root.drag-move();
+                        } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                            root.end-drag();
+                        }
+                    }
+                }
+            }
+            Text {
+                text: root.reminder-title;
+                color: Theme.ink; font-size: 18px; font-weight: 800;
+                overflow: elide;
+            }
+            Text {
+                text: root.reminder-body;
+                color: Theme.muted; font-size: 12px;
+                wrap: word-wrap; vertical-stretch: 1;
+            }
+            SoftButton {
+                height: 38px;
+                label: "已处理";
+                emphasized: true;
+                clicked => { root.acknowledged(); }
+            }
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "Schedule Manager";
     icon: @image-url("../assets/schedule-logo-64.png");
@@ -660,8 +762,12 @@ export component AppWindow inherits Window {
     in-out property <bool> reminder-10m: false;
     in-out property <bool> reminder-1h: false;
     in-out property <bool> reminder-1d: false;
+    in-out property <bool> event-force-reminder: false;
     in-out property <bool> event-all-day: false;
     in-out property <bool> event-completed: false;
+    in-out property <bool> event-saving: false;
+    in-out property <string> editor-feedback;
+    in-out property <bool> editor-feedback-error: false;
     in-out property <bool> editor-visible: false;
     in-out property <bool> auth-visible: false;
     in-out property <bool> register-mode: false;
@@ -944,15 +1050,24 @@ export component AppWindow inherits Window {
                         }
                         HorizontalLayout {
                             height: 30px; spacing: 8px;
-                            Toggle { visible: root.event-schedule-kind == 0 || root.event-schedule-kind == 3; width: 105px; label: "全天"; checked <=> root.event-all-day; }
+                            Toggle { visible: root.event-schedule-kind == 0 || root.event-schedule-kind == 3; width: 84px; label: "全天"; checked <=> root.event-all-day; }
+                            Toggle { horizontal-stretch: 1; label: "强制提醒"; checked <=> root.event-force-reminder; }
                             Toggle { horizontal-stretch: 1; label: "标记完成"; checked <=> root.event-completed; }
                         }
                         Rectangle { vertical-stretch: 1; }
+                        Text {
+                            visible: root.editor-feedback != "";
+                            height: 28px;
+                            text: root.editor-feedback;
+                            color: root.editor-feedback-error ? Theme.danger : Theme.accent-deep;
+                            font-size: 10px; wrap: word-wrap;
+                            vertical-alignment: center;
+                        }
                         HorizontalLayout { height: 34px; spacing: 7px;
                             SoftButton { visible: root.selected-event-id != ""; width: 58px; label: "删除"; danger: true; clicked => { root.delete-event(); } }
                             Rectangle { horizontal-stretch: 1; }
                             SoftButton { width: 58px; label: "取消"; clicked => { root.editor-visible = false; } }
-                            SoftButton { width: 72px; label: "保存"; emphasized: true; clicked => { root.save-event(); } }
+                            SoftButton { width: 72px; label: root.event-saving ? "保存中…" : "保存"; enabled: !root.event-saving; emphasized: true; clicked => { root.save-event(); } }
                         }
                     }
                 }
