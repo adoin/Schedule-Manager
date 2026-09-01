@@ -128,6 +128,35 @@ impl Default for DesktopWidgetConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupBehavior {
+    HideToTray = 0,
+    DockToDesktop = 1,
+    OpenMainProgram = 2,
+}
+
+impl StartupBehavior {
+    fn from_value(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(Self::HideToTray),
+            1 => Some(Self::DockToDesktop),
+            2 => Some(Self::OpenMainProgram),
+            _ => None,
+        }
+    }
+
+    fn from_setting(value: Option<&str>) -> Self {
+        value
+            .and_then(|value| value.parse::<i32>().ok())
+            .and_then(Self::from_value)
+            .unwrap_or(Self::HideToTray)
+    }
+
+    fn value(self) -> i32 {
+        self as i32
+    }
+}
+
 pub fn run() -> Result<()> {
     install_application_panic_log();
     app_log(format!(
@@ -138,7 +167,9 @@ pub fn run() -> Result<()> {
             .unwrap_or_else(|error| format!("<unavailable: {error}>")),
         std::env::args_os().collect::<Vec<_>>()
     ));
-    let mut startup_hidden = std::env::args_os().any(|arg| arg == OsStr::new("--startup-hidden"));
+    let launched_by_autostart = std::env::args_os().any(|arg| arg == OsStr::new("--autostart"));
+    let legacy_startup_hidden =
+        std::env::args_os().any(|arg| arg == OsStr::new("--startup-hidden"));
     #[cfg(target_os = "windows")]
     let notification_identity_error = crate::windows_notifications::prepare_identity().err();
     let repository = LocalRepository::open()?;
@@ -159,6 +190,15 @@ pub fn run() -> Result<()> {
     let notifications_enabled = bool_setting(&repository, "notifications_enabled", true);
     let notification_sound_enabled = bool_setting(&repository, "notification_sound_enabled", true);
     let autostart_enabled = bool_setting(&repository, "autostart_enabled", false);
+    let startup_behavior_setting = repository.setting("startup_behavior")?;
+    let startup_behavior = StartupBehavior::from_setting(startup_behavior_setting.as_deref());
+    let mut launch_behavior = if legacy_startup_hidden {
+        StartupBehavior::HideToTray
+    } else if launched_by_autostart {
+        startup_behavior
+    } else {
+        StartupBehavior::OpenMainProgram
+    };
     let autostart_result = configure_autostart(autostart_enabled);
     app.set_close_behavior(close_behavior);
     app.set_settings_close_behavior(close_behavior.max(0));
@@ -168,6 +208,8 @@ pub fn run() -> Result<()> {
     app.set_settings_notification_sound_enabled(notification_sound_enabled);
     app.set_autostart_enabled(autostart_enabled);
     app.set_settings_autostart_enabled(autostart_enabled);
+    app.set_startup_behavior(startup_behavior.value());
+    app.set_settings_startup_behavior(startup_behavior.value());
     app.set_autostart_status(
         autostart_status(autostart_enabled, autostart_result.as_ref().err()).into(),
     );
@@ -202,7 +244,7 @@ pub fn run() -> Result<()> {
         Err(error) => {
             eprintln!("system tray startup failed: {error:#}");
             app_log(format!("system tray startup failed: {error:#}"));
-            startup_hidden = false;
+            launch_behavior = StartupBehavior::OpenMainProgram;
             app.set_close_behavior(-1);
             app.set_status(format!("系统托盘启动失败，请关闭时选择完全退出：{error}").into());
             None
@@ -219,11 +261,22 @@ pub fn run() -> Result<()> {
     {
         sync_in_background(&app, state.clone());
     }
-    if !startup_hidden {
-        app.show()?;
+    match launch_behavior {
+        StartupBehavior::HideToTray => {
+            app.set_status("已在系统托盘后台启动".into());
+        }
+        StartupBehavior::DockToDesktop => {
+            if let Err(error) = dock_to_desktop(&app, &widget, &state) {
+                app_log(format!("startup dock to desktop failed: {error:#}"));
+                app.set_status(format!("启动后吸附桌面失败，已打开主程序：{error}").into());
+                app.show()?;
+                launch_behavior = StartupBehavior::OpenMainProgram;
+            }
+        }
+        StartupBehavior::OpenMainProgram => app.show()?,
     }
     app_log(format!(
-        "event loop starting startup_hidden={startup_hidden}"
+        "event loop starting launched_by_autostart={launched_by_autostart} legacy_startup_hidden={legacy_startup_hidden} launch_behavior={launch_behavior:?}"
     ));
     slint::run_event_loop_until_quit()?;
     app_log("event loop stopped");
@@ -320,6 +373,7 @@ fn wire_callbacks(
         let notifications_enabled = app.get_settings_notifications_enabled();
         let notification_sound_enabled = app.get_settings_notification_sound_enabled();
         let autostart_enabled = app.get_settings_autostart_enabled();
+        let startup_behavior = app.get_settings_startup_behavior().clamp(0, 2);
         let result = (|| -> Result<()> {
             configure_autostart(autostart_enabled)?;
             let repo = LocalRepository::open()?;
@@ -344,6 +398,7 @@ fn wire_callbacks(
                 "autostart_enabled",
                 if autostart_enabled { "true" } else { "false" },
             )?;
+            repo.set_setting("startup_behavior", &startup_behavior.to_string())?;
             Ok(())
         })();
         match result {
@@ -352,6 +407,7 @@ fn wire_callbacks(
                 app.set_notifications_enabled(notifications_enabled);
                 app.set_notification_sound_enabled(notification_sound_enabled);
                 app.set_autostart_enabled(autostart_enabled);
+                app.set_startup_behavior(startup_behavior);
                 app.set_autostart_status(autostart_status(autostart_enabled, None).into());
                 app.set_settings_visible(false);
                 app.set_status("设置已保存".into());
@@ -1732,6 +1788,35 @@ mod sync_tests {
     }
 }
 
+#[cfg(test)]
+mod startup_behavior_tests {
+    use super::StartupBehavior;
+
+    #[test]
+    fn startup_behavior_uses_tray_as_the_safe_default() {
+        assert_eq!(
+            StartupBehavior::from_setting(None),
+            StartupBehavior::HideToTray
+        );
+        assert_eq!(
+            StartupBehavior::from_setting(Some("invalid")),
+            StartupBehavior::HideToTray
+        );
+    }
+
+    #[test]
+    fn startup_behavior_round_trips_persisted_values() {
+        for behavior in [
+            StartupBehavior::HideToTray,
+            StartupBehavior::DockToDesktop,
+            StartupBehavior::OpenMainProgram,
+        ] {
+            let persisted = behavior.value().to_string();
+            assert_eq!(StartupBehavior::from_setting(Some(&persisted)), behavior);
+        }
+    }
+}
+
 fn refresh_holidays_in_background(app: &AppWindow, state: Arc<Mutex<UiState>>) {
     let year = Local::now().year();
     let weak = app.as_weak();
@@ -2392,7 +2477,7 @@ fn configure_autostart(enabled: bool) -> Result<()> {
     }
 
     let executable = std::env::current_exe().context("无法读取当前程序路径")?;
-    let action = format!("\"{}\" --startup-hidden", executable.display());
+    let action = format!("\"{}\" --autostart", executable.display());
     let output = run_schtasks(&[
         "/Create",
         "/TN",
@@ -2469,7 +2554,7 @@ fn configure_autostart(enabled: bool) -> Result<()> {
 <dict>
   <key>Label</key><string>com.emssion.schedule-manager</string>
   <key>ProgramArguments</key>
-  <array><string>{executable}</string><string>--startup-hidden</string></array>
+  <array><string>{executable}</string><string>--autostart</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><false/>
 </dict>
@@ -2478,7 +2563,7 @@ fn configure_autostart(enabled: bool) -> Result<()> {
     );
     fs::write(&launch_agent, plist).context("无法写入 macOS 用户启动项")?;
     let installed = fs::read_to_string(&launch_agent).context("无法检测 macOS 用户启动项")?;
-    if !installed.contains("--startup-hidden") || !installed.contains(&executable) {
+    if !installed.contains("--autostart") || !installed.contains(&executable) {
         return Err(anyhow!("macOS 用户启动项写入后未能通过检测"));
     }
     Ok(())

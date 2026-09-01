@@ -486,7 +486,7 @@ impl CalendarWidgetApp {
                     Color32::from_rgba_unmultiplied(255, 177, 183, 58),
                 );
                 painter.text(
-                    center,
+                    center + Vec2::new(0.0, -1.0),
                     egui::Align2::CENTER_CENTER,
                     kind,
                     FontId::proportional(8.0),

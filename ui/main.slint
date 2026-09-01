@@ -786,6 +786,8 @@ export component AppWindow inherits Window {
     in-out property <bool> settings-notification-sound-enabled: true;
     in-out property <bool> autostart-enabled: false;
     in-out property <bool> settings-autostart-enabled: false;
+    in-out property <int> startup-behavior: 0;
+    in-out property <int> settings-startup-behavior: 0;
     in-out property <string> autostart-status: "未启用";
     in-out property <string> auth-email;
     in-out property <string> auth-password;
@@ -880,6 +882,7 @@ export component AppWindow inherits Window {
                             root.settings-notifications-enabled = root.notifications-enabled;
                             root.settings-notification-sound-enabled = root.notification-sound-enabled;
                             root.settings-autostart-enabled = root.autostart-enabled;
+                            root.settings-startup-behavior = root.startup-behavior;
                             root.settings-visible = true;
                         }
                     }
@@ -1240,7 +1243,35 @@ export component AppWindow inherits Window {
                         Text { text: "吸附桌面会保留可点击日历；托盘右键可以打开主界面、重新吸附或同步退出。"; color: Theme.muted; font-size: 10px; wrap: word-wrap; }
                         Rectangle { height: 1px; background: Theme.island-soft; }
                         Text { text: "开机启动"; color: Theme.ink; font-size: 12px; font-weight: 700; }
-                        Toggle { label: "登录系统时在托盘后台启动"; checked <=> root.settings-autostart-enabled; }
+                        Toggle { label: "登录系统时自动启动"; checked <=> root.settings-autostart-enabled; }
+                        Text {
+                            text: "启动后";
+                            color: Theme.ink; font-size: 11px; font-weight: 700;
+                            opacity: root.settings-autostart-enabled ? 1 : 0.55;
+                        }
+                        HorizontalLayout { height: 38px; spacing: 8px; opacity: root.settings-autostart-enabled ? 1 : 0.55;
+                            SoftButton {
+                                horizontal-stretch: 1;
+                                label: "最小化到托盘";
+                                enabled: root.settings-autostart-enabled;
+                                emphasized: root.settings-startup-behavior == 0;
+                                clicked => { root.settings-startup-behavior = 0; }
+                            }
+                            SoftButton {
+                                horizontal-stretch: 1;
+                                label: "吸附到桌面";
+                                enabled: root.settings-autostart-enabled;
+                                emphasized: root.settings-startup-behavior == 1;
+                                clicked => { root.settings-startup-behavior = 1; }
+                            }
+                            SoftButton {
+                                horizontal-stretch: 1;
+                                label: "打开主程序";
+                                enabled: root.settings-autostart-enabled;
+                                emphasized: root.settings-startup-behavior == 2;
+                                clicked => { root.settings-startup-behavior = 2; }
+                            }
+                        }
                         Text {
                             text: root.autostart-status;
                             color: Theme.muted; font-size: 10px; wrap: word-wrap;
