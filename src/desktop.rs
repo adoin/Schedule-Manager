@@ -155,6 +155,16 @@ impl StartupBehavior {
     fn value(self) -> i32 {
         self as i32
     }
+
+    fn for_launch(self, autostart_enabled: bool, legacy_startup_hidden: bool) -> Self {
+        if legacy_startup_hidden {
+            Self::HideToTray
+        } else if autostart_enabled {
+            self
+        } else {
+            Self::OpenMainProgram
+        }
+    }
 }
 
 pub fn run() -> Result<()> {
@@ -192,13 +202,11 @@ pub fn run() -> Result<()> {
     let autostart_enabled = bool_setting(&repository, "autostart_enabled", false);
     let startup_behavior_setting = repository.setting("startup_behavior")?;
     let startup_behavior = StartupBehavior::from_setting(startup_behavior_setting.as_deref());
-    let mut launch_behavior = if legacy_startup_hidden {
-        StartupBehavior::HideToTray
-    } else if launched_by_autostart {
-        startup_behavior
-    } else {
-        StartupBehavior::OpenMainProgram
-    };
+    // Keep the configured launch behavior consistent between a Windows/macOS
+    // login launch and a manual restart. The previous argument-only check made
+    // the setting appear broken whenever the user verified it by reopening the
+    // application directly.
+    let mut launch_behavior = startup_behavior.for_launch(autostart_enabled, legacy_startup_hidden);
     let autostart_result = configure_autostart(autostart_enabled);
     app.set_close_behavior(close_behavior);
     app.set_settings_close_behavior(close_behavior.max(0));
@@ -1814,6 +1822,34 @@ mod startup_behavior_tests {
             let persisted = behavior.value().to_string();
             assert_eq!(StartupBehavior::from_setting(Some(&persisted)), behavior);
         }
+    }
+
+    #[test]
+    fn enabled_autostart_behavior_applies_to_manual_and_login_launches() {
+        assert_eq!(
+            StartupBehavior::DockToDesktop.for_launch(true, false),
+            StartupBehavior::DockToDesktop
+        );
+        assert_eq!(
+            StartupBehavior::HideToTray.for_launch(true, false),
+            StartupBehavior::HideToTray
+        );
+    }
+
+    #[test]
+    fn disabled_autostart_opens_main_program() {
+        assert_eq!(
+            StartupBehavior::DockToDesktop.for_launch(false, false),
+            StartupBehavior::OpenMainProgram
+        );
+    }
+
+    #[test]
+    fn legacy_hidden_argument_still_takes_priority() {
+        assert_eq!(
+            StartupBehavior::OpenMainProgram.for_launch(true, true),
+            StartupBehavior::HideToTray
+        );
     }
 }
 
