@@ -13,6 +13,10 @@ use eframe::egui::{
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf, time::Instant};
 
+macro_rules! widget_log {
+    ($($arg:tt)*) => { crate::widget_diagnostics::log(format!($($arg)*)) };
+}
+
 const WIDGET_WIDTH: f32 = 820.0;
 const WIDGET_HEIGHT: f32 = 610.0;
 const WINDOW_IDENTITY: &str = "Schedule Manager Desktop Widget";
@@ -90,6 +94,8 @@ pub fn run() -> Result<()> {
         Some(guard) => guard,
         None => return Ok(()),
     };
+    #[cfg(target_os = "windows")]
+    crate::widget_diagnostics::start();
     let config = load_config().unwrap_or_default();
     let mut viewport = ViewportBuilder::default()
         .with_title(WINDOW_IDENTITY)
@@ -233,6 +239,7 @@ impl CalendarWidgetApp {
     }
 
     fn refresh_data(&mut self) {
+        crate::widget_diagnostics::progress(3);
         let Ok(repository) = LocalRepository::open() else {
             return;
         };
@@ -626,20 +633,22 @@ impl CalendarWidgetApp {
 
 impl eframe::App for CalendarWidgetApp {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        if take_exit_signal() {
-            eprintln!("widget-exit-signal status=received");
+        crate::widget_diagnostics::progress(1);
+        if take_exit_signal() || crate::widget_diagnostics::exit_requested() {
+            crate::widget_diagnostics::request_exit();
             ctx.send_viewport_cmd(ViewportCommand::Close);
             return;
         }
         self.install_fonts(ctx);
         #[cfg(target_os = "windows")]
         {
+            crate::widget_diagnostics::progress(2);
             if !self.native_desktop_attach_attempted {
                 self.native_desktop_attach_attempted = true;
                 match windows_native::attach_to_desktop(frame) {
                     Ok(()) => self.native_desktop_attached = true,
                     Err(error) => {
-                        eprintln!("widget-desktop-attach status=failed error={error:#}")
+                        widget_log!("widget-desktop-attach status=failed error={error:#}")
                     }
                 }
             }
@@ -672,13 +681,13 @@ impl eframe::App for CalendarWidgetApp {
         }
         if !self.glass_initialized {
             if let Err(error) = initialize_glass(frame) {
-                eprintln!("desktop widget glass initialization failed: {error:#}");
+                widget_log!("desktop widget glass initialization failed: {error:#}");
             }
             self.glass_initialized = true;
         }
         #[cfg(target_os = "windows")]
         if !self.native_diagnostics_logged {
-            eprintln!("{}", windows_native::diagnostic_snapshot(frame, ctx));
+            widget_log!("{}", windows_native::diagnostic_snapshot(frame, ctx));
             self.native_diagnostics_logged = true;
         }
 
@@ -706,9 +715,11 @@ impl eframe::App for CalendarWidgetApp {
         #[cfg(not(target_os = "windows"))]
         let repaint_interval_ms = 16;
         ctx.request_repaint_after(std::time::Duration::from_millis(repaint_interval_ms));
+        crate::widget_diagnostics::progress(5);
     }
 
     fn ui(&mut self, root_ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        crate::widget_diagnostics::progress(4);
         let ctx = root_ui.ctx().clone();
         let window_rect = root_ui.max_rect();
         #[cfg(target_os = "windows")]
@@ -793,9 +804,11 @@ impl eframe::App for CalendarWidgetApp {
                 egui::StrokeKind::Inside,
             );
         }
+        crate::widget_diagnostics::progress(5);
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        crate::widget_diagnostics::progress(5);
         [0.0, 0.0, 0.0, 0.0]
     }
 }
@@ -899,19 +912,20 @@ impl WallpaperBackdrop {
                     egui::TextureOptions::LINEAR,
                 ));
                 self.receiver = None;
-                eprintln!(
+                widget_log!(
                     "widget-wallpaper-backdrop status=ready texture={}x{} renderer=glow",
-                    size[0], size[1]
+                    size[0],
+                    size[1]
                 );
             }
             Ok(Err(error)) => {
                 self.receiver = None;
-                eprintln!("widget-wallpaper-backdrop status=failed error={error:#}");
+                widget_log!("widget-wallpaper-backdrop status=failed error={error:#}");
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.receiver = None;
-                eprintln!("widget-wallpaper-backdrop status=failed error=worker disconnected");
+                widget_log!("widget-wallpaper-backdrop status=failed error=worker disconnected");
             }
         }
     }
@@ -1012,7 +1026,7 @@ fn take_exit_signal() -> bool {
         Ok(()) => true,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
         Err(error) => {
-            eprintln!(
+            widget_log!(
                 "widget-exit-signal status=failed path={} error={error}",
                 path.display()
             );
@@ -1141,7 +1155,10 @@ mod windows_native {
     fn hwnd(frame: &eframe::Frame) -> Option<HWND> {
         let handle = frame.window_handle().ok()?;
         match handle.as_raw() {
-            RawWindowHandle::Win32(handle) => Some(handle.hwnd.get() as _),
+            RawWindowHandle::Win32(handle) => {
+                crate::widget_diagnostics::set_window(handle.hwnd.get());
+                Some(handle.hwnd.get() as _)
+            }
             _ => None,
         }
     }
@@ -1156,6 +1173,25 @@ mod windows_native {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
+        // Sparse lifecycle events help correlate stalls with monitor, DWM,
+        // sleep/resume and Explorer changes. Never log paint/mouse traffic.
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED,
+            WM_POWERBROADCAST, WM_SHOWWINDOW,
+        };
+        if matches!(
+            message,
+            WM_DISPLAYCHANGE
+                | WM_DPICHANGED
+                | WM_DWMCOMPOSITIONCHANGED
+                | WM_POWERBROADCAST
+                | WM_DESTROY
+                | WM_SHOWWINDOW
+        ) {
+            widget_log!(
+                "native-event hwnd={window:p} message=0x{message:04x} wparam={wparam} lparam={lparam}"
+            );
+        }
         match message {
             WM_NCCALCSIZE | WM_NCPAINT => return 0,
             WM_NCACTIVATE => return 1,
@@ -1208,9 +1244,9 @@ mod windows_native {
         };
         if previous != 0 {
             ORIGINAL_WNDPROC.store(previous, Ordering::Release);
-            eprintln!("widget-frameless-wndproc status=ready hwnd={window:p}");
+            widget_log!("widget-frameless-wndproc status=ready hwnd={window:p}");
         } else {
-            eprintln!("widget-frameless-wndproc status=failed hwnd={window:p}");
+            widget_log!("widget-frameless-wndproc status=failed hwnd={window:p}");
         }
     }
 
@@ -1326,7 +1362,7 @@ mod windows_native {
                 );
                 anyhow::bail!("cannot position widget inside WorkerW");
             }
-            eprintln!(
+            widget_log!(
                 "widget-desktop-attach status=ready hwnd={window:p} worker={worker:p} position={x},{y} size={width}x{height}"
             );
         }

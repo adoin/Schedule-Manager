@@ -60,6 +60,25 @@ bash scripts/package-macos.sh
 
 产物位于 `dist/Schedule Manager.app`。脚本会写入 bundle identifier 以支持系统通知；发布签名与公证应在 Apple 开发者环境完成。
 
+## 桌面挂件白屏 / 卡住的诊断
+
+Windows 日志目录：`%LOCALAPPDATA%\Emssion\ScheduleManager\data\logs`。
+主程序写入 `schedule-manager.日期.log`，挂件写入 `schedule-desktop-widget.日期.log`（含时间、PID、panic 堆栈、窗口事件和后台心跳）。
+
+新版挂件使用独立后台线程监测界面进展：持续 15 秒无进展时记录执行阶段、窗口/父窗口状态，并通过独立进程保存 `logs\dumps\widget-*.dmp` 线程转储。
+休眠或明显的调度间隔不直接算作卡顿；自动转储每次运行最多 3 份，目录保留最近 10 份。
+收到关闭请求后仍未退出，8 秒后采集诊断再结束挂件进程；转储最多等待 10 秒。主程序的最终同步仍由主程序完成。
+
+如果画面出现白块但程序仍有响应，后台心跳不一定能自动识别。在终止进程前运行：
+
+```powershell
+pwsh.exe -NoLogo -NoProfile -File .\scripts\collect-widget-diagnostics.ps1
+```
+
+脚本将挂件与主程序线程转储、进程清单、显卡驱动版本、近期应用/系统错误和日志保存到数据目录的 `diagnostics` 子目录，不会结束被采集的应用进程。
+可用 `-WidgetExecutable '新版挂件路径.exe'` 指定转储工具；新版工具也能采集尚未更新的已运行程序。
+转储可能包含进程内存中的日程内容，仅保存在本机。分析时请保留与 EXE 匹配的构建产物；需要 Rust 符号的诊断版本可用 `cargo build --profile diagnostic --bins` 构建并保留同目录 PDB。
+
 ## 服务端
 
 服务端是独立 Cargo 包，不编译 Slint：

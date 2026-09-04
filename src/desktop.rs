@@ -71,7 +71,10 @@ fn app_log(message: impl AsRef<str>) {
 fn install_application_panic_log() {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
-        app_log(format!("panic: {panic_info}"));
+        app_log(format!(
+            "panic: {panic_info}\nbacktrace:\n{}",
+            std::backtrace::Backtrace::force_capture()
+        ));
         original_hook(panic_info);
     }));
 }
@@ -338,13 +341,16 @@ fn wire_callbacks(
     let shared = state.clone();
     app.on_request_full_exit(move || {
         let Some(app) = weak.upgrade() else { return };
+        app_log("full exit action received");
         if app.get_exit_pending() {
+            app_log("full exit already pending");
             return;
         }
         let pending_forced = LocalRepository::open()
             .and_then(|repo| repo.pending_forced_reminders())
             .unwrap_or_default();
         if !pending_forced.is_empty() {
+            app_log("full exit blocked by pending forced reminders");
             if let Some(forced_reminder) = weak_forced_reminder.upgrade() {
                 let _ = refresh_forced_reminder_window(&forced_reminder);
             }

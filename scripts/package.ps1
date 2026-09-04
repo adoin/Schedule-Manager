@@ -48,6 +48,7 @@ try {
     Copy-Item -LiteralPath $binaryPath -Destination (Join-Path $stagePath 'ScheduleManager.exe')
     Copy-Item -LiteralPath $widgetBinaryPath -Destination (Join-Path $stagePath 'schedule-desktop-widget.exe')
     Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination (Join-Path $stagePath 'README.md')
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts\collect-widget-diagnostics.ps1') -Destination (Join-Path $stagePath 'collect-widget-diagnostics.ps1')
     Write-Host "Portable folder ready: $stagePath"
 
     if ($Installer) {

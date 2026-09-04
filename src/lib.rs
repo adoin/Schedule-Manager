@@ -8,6 +8,8 @@ pub mod api_client;
 pub mod desktop;
 #[cfg(feature = "desktop")]
 pub mod widget;
+#[cfg(feature = "desktop")]
+pub mod widget_diagnostics;
 #[cfg(all(feature = "desktop", target_os = "windows"))]
 pub mod windows_notifications;
 
