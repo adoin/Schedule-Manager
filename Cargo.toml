@@ -1,6 +1,6 @@
 [package]
 name = "schedule-manager"
-version = "1.0.10"
+version = "1.0.11"
 edition = "2024"
 description = "Cross-platform Chinese calendar and schedule manager"
 license = "MIT"
@@ -14,7 +14,7 @@ anyhow = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 directories = "6.0"
-eframe = { version = "0.36.1", optional = true, features = ["wgpu", "glow"] }
+eframe = { version = "0.36.1", optional = true, default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
 lunar-lite = "1.3"
 openssl = { version = "0.10", features = ["vendored"] }
 raw-window-handle = "0.6"
@@ -49,9 +49,19 @@ slint-build = "1.17"
 winres = "0.1"
 
 [profile.release]
-lto = true
-codegen-units = 1
+lto = "thin"
+codegen-units = 16
 strip = true
+
+# Keep all tests without paying release LTO costs for every test executable.
+# CI caches this profile alongside the release dependency artifacts.
+[profile.ci]
+inherits = "dev"
+opt-level = 1
+debug = 0
+incremental = false
+codegen-units = 16
+lto = false
 
 # Keep matching symbols for intermittent native/driver hangs captured in minidumps.
 [profile.diagnostic]

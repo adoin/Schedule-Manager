@@ -1,5 +1,6 @@
 param(
     [switch]$Installer,
+    [switch]$SkipBuild,
     [string]$Version = ""
 )
 
@@ -29,7 +30,12 @@ if (-not (Get-Command perl.exe -ErrorAction SilentlyContinue)) {
 
 Push-Location $projectRoot
 try {
-    cargo build --release --locked --bins
+    if (-not $SkipBuild) {
+        cargo build --release --locked --bins --timings
+        if ($LASTEXITCODE -ne 0) {
+            throw "Cargo release build failed with exit code $LASTEXITCODE."
+        }
+    }
     if (-not (Test-Path -LiteralPath $binaryPath)) {
         throw "Release executable missing: $binaryPath"
     }

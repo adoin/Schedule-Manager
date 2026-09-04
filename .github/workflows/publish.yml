@@ -1,0 +1,95 @@
+name: Publish Release
+
+on:
+  push:
+    tags: ["*.*.*"]
+  workflow_run:
+    workflows: [Build Windows]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  resolve:
+    # Never consume artifacts from PR/fork builds in a privileged workflow.
+    if: >-
+      github.event_name == 'push' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       github.event.workflow_run.head_branch == 'main' &&
+       (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      ready: ${{ steps.resolve.outputs.ready }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      commit: ${{ steps.resolve.outputs.commit }}
+      run_id: ${{ steps.resolve.outputs.run_id }}
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Match tag to a successful build of the exact commit
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release_artifact.py resolve
+
+  publish:
+    needs: resolve
+    if: needs.resolve.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: publish-${{ needs.resolve.outputs.tag }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@v7
+        with:
+          name: schedule-manager-windows-${{ needs.resolve.outputs.commit }}
+          run-id: ${{ needs.resolve.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: release-assets
+      - name: Verify commit, version and installer checksum
+        env:
+          EXPECTED_COMMIT: ${{ needs.resolve.outputs.commit }}
+          EXPECTED_VERSION: ${{ needs.resolve.outputs.version }}
+          EXPECTED_RUN_ID: ${{ needs.resolve.outputs.run_id }}
+        run: python3 scripts/release_artifact.py verify
+      - name: Publish verified installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          EXPECTED_COMMIT: ${{ needs.resolve.outputs.commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Refuse a moved tag, even if it changed after artifact resolution.
+          git fetch --force origin "refs/tags/$TAG_NAME:refs/tags/$TAG_NAME"
+          test "$(git rev-parse "$TAG_NAME^{commit}")" = "$EXPECTED_COMMIT"
+          installer="release-assets/ScheduleManager-Setup-$VERSION.exe"
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" "$installer" --clobber
+          else
+            gh release create "$TAG_NAME" "$installer" \
+              --verify-tag --title "Schedule Manager $TAG_NAME" \
+              --notes "已通过测试的 Windows 安装版本，复用对应提交的构建产物。"
+          fi

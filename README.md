@@ -60,6 +60,18 @@ bash scripts/package-macos.sh
 
 产物位于 `dist/Schedule Manager.app`。脚本会写入 bundle identifier 以支持系统通知；发布签名与公证应在 Apple 开发者环境完成。
 
+## 自动构建与发布
+
+- 推送 `main` 时，`Build Windows` 使用固定的 Rust 1.98.0 构建；依赖缓存保存在主分支，包含 `ci` 测试配置和 `release` 配置，后续提交可恢复兼容的缓存。
+- 测试仍运行 `--all-targets`，使用无 LTO、无调试符号的 `ci` 配置；正式程序使用 Thin LTO 和 16 个代码生成单元。挂件仅编译实际使用的 Glow 渲染器。
+- 正式 EXE 只构建一次，打包使用 `scripts/package.ps1 -Installer -SkipBuild`。安装包与记录提交 SHA、版本、构建编号、SHA256 的清单一起保存 30 天。
+- 推送与 `Cargo.toml` 版本一致的 tag（如 `1.0.11`）后，`Publish Release` 只下载同一提交成功构建的安装包。若构建尚未结束，成功事件会自动继续发布；若先构建后打 tag，则直接复用已有安装包。两条路径均校验产物身份和校验和，不再启动第二次 Rust 构建。
+- 失败、其他提交、其他分支或过期的构建产物不会发布。需要重新生成时，在 Actions 中重跑对应提交的 `Build Windows`；手动触发工作流仅允许 `main`。
+- 不再自动删除旧的构建记录，以免连带删除待发布安装包；由 artifact 保留期限控制产物清理。每次构建还保存 Cargo timings 报告 14 天，便于比较真实编译耗时。
+
+本地验证：`cargo test --profile ci --locked --all-targets`、`python -m unittest discover -s scripts/tests -v`。
+首次切换配置需要重新建立缓存，提速应以后续缓存命中的运行数据评估。
+
 ## 桌面挂件白屏 / 卡住的诊断
 
 Windows 日志目录：`%LOCALAPPDATA%\Emssion\ScheduleManager\data\logs`。

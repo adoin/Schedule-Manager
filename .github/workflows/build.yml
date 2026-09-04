@@ -1,0 +1,97 @@
+name: Build Windows
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: "1.98.0"
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    name: Test and build Windows installer
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal
+
+      - name: Restore shared main-branch dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: schedule-windows-v2
+          cache-on-failure: true
+
+      - name: Prepare native build tools
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path 'C:\Strawberry\perl\bin\perl.exe')) {
+            choco install strawberryperl --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'Strawberry Perl installation failed.' }
+          }
+          $compiler = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $compiler)) {
+            choco install innosetup --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'Inno Setup installation failed.' }
+          }
+          'C:\Strawberry\c\bin' | Out-File -FilePath $env:GITHUB_PATH -Append
+          'C:\Strawberry\perl\bin' | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Test release artifact selection and verification
+        run: python -m unittest discover -s scripts/tests -v
+
+      - name: Compile and run all tests
+        run: cargo test --profile ci --locked --all-targets --timings
+
+      - name: Build release binaries
+        run: cargo build --release --locked --bins --timings
+
+      - name: Package without rebuilding
+        run: .\scripts\package.ps1 -Installer -SkipBuild
+
+      - name: Record artifact identity
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot read package version.' }
+          $version = ($metadata.packages | Where-Object name -eq 'schedule-manager').version
+          $installer = Get-Item -LiteralPath "dist/ScheduleManager-Setup-$version.exe"
+          @{
+            commit = $env:GITHUB_SHA
+            version = $version
+            run_id = $env:GITHUB_RUN_ID
+            filename = $installer.Name
+            sha256 = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          } | ConvertTo-Json | Set-Content -LiteralPath dist/build-manifest.json -Encoding utf8
+
+      - name: Save installer for this commit
+        uses: actions/upload-artifact@v6
+        with:
+          name: schedule-manager-windows-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+          path: |
+            dist/ScheduleManager-Setup-*.exe
+            dist/build-manifest.json
+
+      - name: Save compilation timings
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: cargo-timings-${{ github.sha }}-${{ github.run_attempt }}
+          if-no-files-found: ignore
+          retention-days: 14
+          path: target/cargo-timings/*.html
