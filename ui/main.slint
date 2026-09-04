@@ -1210,8 +1210,13 @@ export component AppWindow inherits Window {
                 }
                 ScrollView {
                     vertical-stretch: 1;
+                    viewport-width: self.visible-width;
+                    horizontal-scrollbar-policy: always-off;
                     VerticalLayout {
                         spacing: 10px;
+                        // Fluent scrollbars overlay the viewport (14px wide).
+                        // Leave room for the scrollbar and button shadows.
+                        padding-right: 22px;
                         Text { text: "关闭按钮行为"; color: Theme.ink; font-size: 12px; font-weight: 700; }
                         Text { text: "选择后会一直沿用，直到你在这里修改。"; color: Theme.muted; font-size: 10px; }
                         HorizontalLayout { height: 38px; spacing: 8px;
