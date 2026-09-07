@@ -110,7 +110,13 @@ pub fn run() -> Result<()> {
         .with_inner_size([WIDGET_WIDTH, WIDGET_HEIGHT])
         .with_min_inner_size([WIDGET_WIDTH, WIDGET_HEIGHT])
         .with_max_inner_size([WIDGET_WIDTH, WIDGET_HEIGHT])
-        .with_transparent(true);
+        // Windows already paints an opaque, pre-blurred wallpaper sample into
+        // the Glow surface. Requesting an alpha framebuffer as well makes the
+        // WorkerW child depend on DWM's transparent OpenGL composition path;
+        // on some hybrid-GPU systems that surface can temporarily turn white
+        // even while the app keeps rendering. Use the ordinary opaque path on
+        // Windows and keep native transparency for the other platforms.
+        .with_transparent(!cfg!(target_os = "windows"));
     if let (Some(x), Some(y)) = (config.x, config.y) {
         viewport = viewport.with_position([x as f32, y as f32]);
     }
@@ -711,7 +717,7 @@ impl eframe::App for CalendarWidgetApp {
             self.position_changed_at = None;
         }
         #[cfg(target_os = "windows")]
-        let repaint_interval_ms = if self.native_drag.is_some() { 8 } else { 16 };
+        let repaint_interval_ms = if self.native_drag.is_some() { 8 } else { 250 };
         #[cfg(not(target_os = "windows"))]
         let repaint_interval_ms = 16;
         ctx.request_repaint_after(std::time::Duration::from_millis(repaint_interval_ms));
@@ -809,7 +815,13 @@ impl eframe::App for CalendarWidgetApp {
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         crate::widget_diagnostics::progress(5);
-        [0.0, 0.0, 0.0, 0.0]
+        if cfg!(target_os = "windows") {
+            // Keep every submitted Windows frame opaque. The wallpaper texture
+            // is drawn first and the glass colors blend over it inside egui.
+            [0.0, 0.0, 0.0, 1.0]
+        } else {
+            [0.0, 0.0, 0.0, 0.0]
+        }
     }
 }
 
@@ -1095,12 +1107,13 @@ mod windows_native {
             Dwm::{
                 DWMNCRP_DISABLED, DWMWA_BORDER_COLOR, DWMWA_EXTENDED_FRAME_BOUNDS,
                 DWMWA_NCRENDERING_POLICY, DWMWA_VISIBLE_FRAME_BORDER_THICKNESS,
-                DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DwmGetWindowAttribute,
+                DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DwmFlush, DwmGetWindowAttribute,
                 DwmSetWindowAttribute,
             },
             Gdi::{
                 CreateRoundRectRgn, DeleteObject, GetMonitorInfoW, GetWindowRgnBox,
-                MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, RGN_ERROR, SetWindowRgn,
+                MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, RDW_ALLCHILDREN,
+                RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW, RGN_ERROR, RedrawWindow, SetWindowRgn,
             },
         },
         System::Threading::CreateMutexW,
@@ -1119,6 +1132,7 @@ mod windows_native {
 
     static ORIGINAL_WNDPROC: AtomicIsize = AtomicIsize::new(0);
     static DESKTOP_CHILD: AtomicBool = AtomicBool::new(false);
+    static COMPOSITION_REFRESH_REQUESTED: AtomicBool = AtomicBool::new(false);
 
     pub struct SingleInstance(HANDLE);
 
@@ -1191,6 +1205,12 @@ mod windows_native {
             widget_log!(
                 "native-event hwnd={window:p} message=0x{message:04x} wparam={wparam} lparam={lparam}"
             );
+        }
+        if matches!(
+            message,
+            WM_DISPLAYCHANGE | WM_DPICHANGED | WM_DWMCOMPOSITIONCHANGED | WM_POWERBROADCAST
+        ) {
+            COMPOSITION_REFRESH_REQUESTED.store(true, Ordering::Release);
         }
         match message {
             WM_NCCALCSIZE | WM_NCPAINT => return 0,
@@ -1450,6 +1470,38 @@ mod windows_native {
                     0,
                     0,
                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+            }
+
+            if COMPOSITION_REFRESH_REQUESTED.swap(false, Ordering::AcqRel) {
+                // Recreate the non-client/composition state after DWM, display,
+                // DPI, sleep or GPU transitions. SWP_NOCOPYBITS prevents DWM
+                // from reusing a stale surface while egui submits a fresh frame.
+                let positioned = SetWindowPos(
+                    window,
+                    std::ptr::null_mut(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE
+                        | SWP_NOSIZE
+                        | SWP_NOZORDER
+                        | SWP_NOACTIVATE
+                        | SWP_FRAMECHANGED
+                        | SWP_NOCOPYBITS,
+                );
+                let redrawn = RedrawWindow(
+                    window,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_FRAME,
+                );
+                let flushed = DwmFlush();
+                ctx.request_repaint();
+                widget_log!(
+                    "widget-composition-refresh positioned={positioned} redrawn={redrawn} dwm_hr=0x{:08x}",
+                    flushed as u32
                 );
             }
 
