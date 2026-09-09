@@ -442,6 +442,7 @@ async fn upsert_event(
     {
         return Err(ApiError::bad_request("提醒时间必须在事件前一年以内"));
     }
+    event.notification_url = normalize_notification_url(&event.notification_url)?;
     let db = state.db.lock().map_err(ApiError::internal)?;
     let existing: Option<(String, i64)> = db
         .query_row(
@@ -474,6 +475,20 @@ async fn upsert_event(
         params![event.id, user.id, payload, event.version, event.updated_seq, event.updated_at.to_rfc3339()],
     ).map_err(ApiError::internal)?;
     Ok(ok(event))
+}
+
+fn normalize_notification_url(value: &str) -> std::result::Result<String, ApiError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(String::new());
+    }
+    let parsed = url::Url::parse(value).map_err(|_| ApiError::bad_request("通知链接格式无效"))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(ApiError::bad_request(
+            "通知链接必须是 http 或 https 网页地址",
+        ));
+    }
+    Ok(parsed.to_string())
 }
 
 #[derive(Deserialize)]
@@ -764,5 +779,15 @@ mod tests {
                 .verify_password(b"correct horse", &parsed)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn notification_url_accepts_only_web_links() {
+        assert!(matches!(
+            normalize_notification_url("https://example.com/meeting"),
+            Ok(value) if value == "https://example.com/meeting"
+        ));
+        assert!(normalize_notification_url("file:///etc/passwd").is_err());
+        assert!(normalize_notification_url("javascript:alert(1)").is_err());
     }
 }

@@ -4952,7 +4952,7 @@ dependencies = [
 
 [[package]]
 name = "schedule-manager"
-version = "1.0.13"
+version = "1.0.14"
 dependencies = [
  "anyhow",
  "chrono",

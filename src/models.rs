@@ -10,6 +10,8 @@ pub struct CalendarEvent {
     pub notes: String,
     #[serde(default)]
     pub location: String,
+    #[serde(default)]
+    pub notification_url: String,
     pub start_at: DateTime<Utc>,
     pub end_at: DateTime<Utc>,
     #[serde(default = "default_timezone")]
@@ -54,6 +56,7 @@ impl CalendarEvent {
             title: String::new(),
             notes: String::new(),
             location: String::new(),
+            notification_url: String::new(),
             start_at,
             end_at,
             timezone: default_timezone(),
@@ -121,7 +124,9 @@ mod tests {
         let now = Utc::now();
         let mut payload = serde_json::to_value(CalendarEvent::draft(now, now)).unwrap();
         payload.as_object_mut().unwrap().remove("forceReminder");
+        payload.as_object_mut().unwrap().remove("notificationUrl");
         let event: CalendarEvent = serde_json::from_value(payload).unwrap();
         assert!(!event.force_reminder);
+        assert!(event.notification_url.is_empty());
     }
 }

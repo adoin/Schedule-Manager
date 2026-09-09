@@ -10,9 +10,9 @@ use windows::{
         System::Diagnostics::Debug::MessageBeep,
         UI::Shell::{
             IShellLinkW, PropertiesSystem::IPropertyStore, SetCurrentProcessExplicitAppUserModelID,
-            ShellLink,
+            ShellExecuteW, ShellLink,
         },
-        UI::WindowsAndMessaging::MB_ICONEXCLAMATION,
+        UI::WindowsAndMessaging::{MB_ICONEXCLAMATION, SW_SHOWNORMAL},
     },
     core::{Interface, PCWSTR},
 };
@@ -73,6 +73,27 @@ pub fn play_reminder_sound() {
     unsafe {
         let _ = MessageBeep(MB_ICONEXCLAMATION);
     }
+}
+
+pub fn open_url(url: &str) -> Result<()> {
+    let operation = wide("open");
+    let target = wide(url);
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(operation.as_ptr()),
+            PCWSTR(target.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    anyhow::ensure!(
+        result.0 as usize > 32,
+        "Windows 无法打开通知链接（ShellExecuteW={}）",
+        result.0 as usize
+    );
+    Ok(())
 }
 
 fn shortcut_path() -> Result<PathBuf> {

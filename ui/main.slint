@@ -754,6 +754,7 @@ export component AppWindow inherits Window {
     in-out property <string> event-lunar-date: "农历正月初一";
     in-out property <string> event-duration: "60";
     in-out property <string> event-location;
+    in-out property <string> event-notification-url;
     in-out property <string> event-notes;
     in-out property <string> event-reminders: "0";
     in-out property <string> event-custom-reminder;
@@ -961,6 +962,14 @@ export component AppWindow inherits Window {
                     }
                     if root.editor-visible : VerticalLayout {
                         spacing: 7px; vertical-stretch: 1;
+                        ScrollView {
+                            vertical-stretch: 1;
+                            viewport-width: self.visible-width;
+                            horizontal-scrollbar-policy: always-off;
+                            VerticalLayout {
+                                spacing: 7px;
+                                // Leave room for the overlay scrollbar.
+                                padding-right: 16px;
                         VerticalLayout {
                             height: 57px; spacing: 4px;
                             Text { height: 15px; text: "标题"; color: Theme.muted; font-size: 10px; vertical-alignment: bottom; }
@@ -1005,10 +1014,18 @@ export component AppWindow inherits Window {
                                 NumberField { value <=> root.event-duration; placeholder: "60"; }
                             }
                         }
-                        VerticalLayout {
-                            height: 57px; spacing: 4px;
-                            Text { height: 15px; text: "地点"; color: Theme.muted; font-size: 10px; vertical-alignment: bottom; }
-                            Field { value <=> root.event-location; placeholder: "可选"; }
+                        HorizontalLayout {
+                            height: 57px; spacing: 7px;
+                            VerticalLayout {
+                                spacing: 4px; horizontal-stretch: 1;
+                                Text { height: 15px; text: "地点"; color: Theme.muted; font-size: 10px; vertical-alignment: bottom; }
+                                Field { value <=> root.event-location; placeholder: "可选"; }
+                            }
+                            VerticalLayout {
+                                spacing: 4px; horizontal-stretch: 1;
+                                Text { height: 15px; text: "通知链接"; color: Theme.muted; font-size: 10px; vertical-alignment: bottom; }
+                                Field { value <=> root.event-notification-url; placeholder: "https://…"; }
+                            }
                         }
                         VerticalLayout {
                             height: 80px; spacing: 4px;
@@ -1057,7 +1074,8 @@ export component AppWindow inherits Window {
                             Toggle { horizontal-stretch: 1; label: "强制提醒"; checked <=> root.event-force-reminder; }
                             Toggle { horizontal-stretch: 1; label: "标记完成"; checked <=> root.event-completed; }
                         }
-                        Rectangle { vertical-stretch: 1; }
+                            }
+                        }
                         Text {
                             visible: root.editor-feedback != "";
                             height: 28px;

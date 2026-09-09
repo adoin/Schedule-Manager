@@ -441,6 +441,7 @@ fn wire_callbacks(
             "Schedule Manager 测试通知",
             "系统通知工作正常，日程提醒也会以这种方式显示。",
             app.get_settings_notification_sound_enabled(),
+            None,
         ) {
             Ok(()) => app.set_status("测试通知已发送".into()),
             Err(error) => app.set_status(format!("测试通知失败：{error}").into()),
@@ -1433,6 +1434,7 @@ fn load_event_into_editor(app: &AppWindow, id: &str) -> Result<()> {
     set_editor_time(app, start.hour() as i32, start.minute() as i32);
     app.set_event_duration(duration.to_string().into());
     app.set_event_location(event.location.into());
+    app.set_event_notification_url(event.notification_url.into());
     app.set_event_notes(event.notes.into());
     app.set_event_reminders(
         event
@@ -1485,6 +1487,7 @@ fn clear_editor(app: &AppWindow, date: NaiveDate) {
     set_editor_time(app, next_hour as i32, 0);
     app.set_event_duration("60".into());
     app.set_event_location("".into());
+    app.set_event_notification_url("".into());
     app.set_event_notes("".into());
     app.set_event_reminders("0".into());
     let (month, day, leap) = lunar_parts(date).unwrap_or((1, 1, false));
@@ -1571,6 +1574,7 @@ fn event_from_editor(app: &AppWindow, state: &Arc<Mutex<UiState>>) -> Result<Cal
     };
     event.title = title;
     event.location = app.get_event_location().to_string();
+    event.notification_url = normalize_notification_url(&app.get_event_notification_url())?;
     event.notes = app.get_event_notes().to_string();
     event.start_at = start;
     event.end_at = start + Duration::minutes(duration);
@@ -1761,6 +1765,7 @@ fn event_content_equal(left: &CalendarEvent, right: &CalendarEvent) -> bool {
     left.title == right.title
         && left.notes == right.notes
         && left.location == right.location
+        && left.notification_url == right.notification_url
         && left.start_at == right.start_at
         && left.end_at == right.end_at
         && left.timezone == right.timezone
@@ -1799,6 +1804,25 @@ mod sync_tests {
         let mut right = left.clone();
         right.force_reminder = true;
         assert!(!event_content_equal(&left, &right));
+
+        let mut right = left.clone();
+        right.notification_url = "https://example.com/meeting".into();
+        assert!(!event_content_equal(&left, &right));
+    }
+
+    #[test]
+    fn notification_url_is_normalized_and_restricted_to_web_links() {
+        assert_eq!(normalize_notification_url("").unwrap(), "");
+        assert_eq!(
+            normalize_notification_url("example.com/meeting").unwrap(),
+            "https://example.com/meeting"
+        );
+        assert_eq!(
+            normalize_notification_url("http://example.com").unwrap(),
+            "http://example.com/"
+        );
+        assert!(normalize_notification_url("file:///C:/secret.txt").is_err());
+        assert!(normalize_notification_url("javascript:alert(1)").is_err());
     }
 }
 
@@ -2304,7 +2328,12 @@ fn deliver_due_reminders(app: &AppWindow, forced_reminder: &ForcedReminderWindow
                             format!("显示强制提醒失败，将在下次启动恢复：{error}").into(),
                         );
                     } else {
-                        let _ = show_system_notification(&event.title, &body, sound_enabled);
+                        let _ = show_system_notification(
+                            &event.title,
+                            &body,
+                            sound_enabled,
+                            Some(&event.notification_url),
+                        );
                         app.set_status(format!("强制提醒：{} · {}", event.title, body).into());
                     }
                 }
@@ -2314,7 +2343,12 @@ fn deliver_due_reminders(app: &AppWindow, forced_reminder: &ForcedReminderWindow
             }
             continue;
         }
-        match show_system_notification(&event.title, &body, sound_enabled) {
+        match show_system_notification(
+            &event.title,
+            &body,
+            sound_enabled,
+            Some(&event.notification_url),
+        ) {
             Ok(()) => match repo.mark_reminder_delivered(
                 &event.id,
                 event.version,
@@ -2330,28 +2364,73 @@ fn deliver_due_reminders(app: &AppWindow, forced_reminder: &ForcedReminderWindow
     }
 }
 
-fn show_system_notification(title: &str, body: &str, sound_enabled: bool) -> Result<()> {
+fn show_system_notification(
+    title: &str,
+    body: &str,
+    sound_enabled: bool,
+    notification_url: Option<&str>,
+) -> Result<()> {
     let mut notification = notify_rust::Notification::new();
     notification.summary(title).body(body);
+    // Revalidate data loaded from disk or sync before exposing an action that
+    // invokes the system URL handler.
+    let notification_url = notification_url
+        .and_then(|value| normalize_notification_url(value).ok())
+        .filter(|value| !value.is_empty());
     #[cfg(target_os = "windows")]
     {
         if crate::windows_notifications::prepare_identity().is_ok() {
             notification.app_id(crate::windows_notifications::APP_USER_MODEL_ID);
+        }
+        if notification_url.is_some() {
+            notification.action("open_url", "打开链接");
         }
     }
     #[cfg(target_os = "macos")]
     if sound_enabled {
         notification.sound_name("default");
     }
-    let result = notification
+    let handle = notification
         .show()
-        .map(|_| ())
-        .map_err(|error| anyhow!(error.to_string()));
-    if result.is_ok() && sound_enabled {
+        .map_err(|error| anyhow!(error.to_string()))?;
+    if sound_enabled {
         #[cfg(target_os = "windows")]
         crate::windows_notifications::play_reminder_sound();
     }
-    result
+    #[cfg(target_os = "windows")]
+    if let Some(url) = notification_url {
+        std::thread::spawn(move || {
+            let _ = handle.wait_for_response(move |response: &notify_rust::NotificationResponse| {
+                if matches!(response, notify_rust::NotificationResponse::Default)
+                    || matches!(response, notify_rust::NotificationResponse::Action(action) if action == "open_url")
+                {
+                    if let Err(error) = crate::windows_notifications::open_url(&url) {
+                        app_log(format!("notification link open failed url={url:?} error={error:#}"));
+                    }
+                }
+            });
+        });
+    }
+    #[cfg(not(target_os = "windows"))]
+    drop(handle);
+    Ok(())
+}
+
+fn normalize_notification_url(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(String::new());
+    }
+    let candidate = if value.contains("://") {
+        value.to_owned()
+    } else {
+        format!("https://{value}")
+    };
+    let parsed = url::Url::parse(&candidate).context("通知链接格式无效")?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(anyhow!("通知链接必须是 http 或 https 网页地址"));
+    }
+    Ok(parsed.to_string())
 }
 
 fn bool_setting(repo: &LocalRepository, key: &str, default: bool) -> bool {
