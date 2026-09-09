@@ -11,6 +11,8 @@ static PROGRESS: AtomicU64 = AtomicU64::new(0);
 static PHASE: AtomicUsize = AtomicUsize::new(0);
 static WINDOW: AtomicIsize = AtomicIsize::new(0);
 static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "windows")]
+pub const COMPOSITION_RECOVERY_MESSAGE: u32 = 0x8000 + 0x52;
 const PHASES: &[&str] = &[
     "startup",
     "logic",
@@ -97,6 +99,33 @@ impl StallTracker {
     }
 }
 
+// A short presentation stall can leave DWM showing its white fallback surface
+// after the event loop itself resumes. Request one compositor refresh after
+// three seconds, well before the 15-second diagnostic threshold.
+#[derive(Default)]
+struct SurfaceRecoveryTracker {
+    progress: u64,
+    idle_seconds: u64,
+    requested: bool,
+}
+
+impl SurfaceRecoveryTracker {
+    fn tick(&mut self, progress: u64, gap_seconds: u64) -> bool {
+        if progress != self.progress || gap_seconds > 5 {
+            self.progress = progress;
+            self.idle_seconds = 0;
+            self.requested = false;
+        } else {
+            self.idle_seconds += gap_seconds;
+        }
+        if self.idle_seconds >= 3 && !self.requested {
+            self.requested = true;
+            return true;
+        }
+        false
+    }
+}
+
 #[cfg(target_os = "windows")]
 pub fn start() {
     use std::{
@@ -105,6 +134,7 @@ pub fn start() {
     };
     thread::spawn(|| {
         let mut tracker = StallTracker::default();
+        let mut recovery_tracker = SurfaceRecoveryTracker::default();
         let mut last_tick = Instant::now();
         let mut last_summary = Instant::now();
         let mut exit_at = None;
@@ -118,8 +148,12 @@ pub fn start() {
             thread::sleep(Duration::from_secs(1));
             let gap = last_tick.elapsed().as_secs();
             last_tick = Instant::now();
+            let progress = PROGRESS.load(Ordering::Acquire);
             let was_stalled = tracker.reported;
-            let stalled = tracker.tick(PROGRESS.load(Ordering::Acquire), gap);
+            let stalled = tracker.tick(progress, gap);
+            if recovery_tracker.tick(progress, gap) {
+                request_composition_recovery(recovery_tracker.idle_seconds);
+            }
             if was_stalled && !tracker.reported {
                 log(format!("watchdog-progress-resumed {}", snapshot()));
             }
@@ -169,6 +203,27 @@ pub fn start() {
             }
         }
     });
+}
+
+#[cfg(target_os = "windows")]
+fn request_composition_recovery(idle_seconds: u64) {
+    use windows_sys::Win32::{Foundation::HWND, UI::WindowsAndMessaging::PostMessageW};
+    let window = WINDOW.load(Ordering::Relaxed) as HWND;
+    if window.is_null() {
+        return;
+    }
+    let posted = unsafe {
+        PostMessageW(
+            window,
+            COMPOSITION_RECOVERY_MESSAGE,
+            idle_seconds as usize,
+            0,
+        )
+    };
+    log(format!(
+        "watchdog-composition-recovery idle_seconds={idle_seconds} posted={posted} {}",
+        snapshot()
+    ));
 }
 
 #[cfg(target_os = "windows")]
@@ -308,7 +363,7 @@ pub fn handle_dump_command() -> Option<anyhow::Result<()>> {
 
 #[cfg(test)]
 mod tests {
-    use super::StallTracker;
+    use super::{StallTracker, SurfaceRecoveryTracker};
 
     #[test]
     fn reports_once_and_rearms_after_recovery() {
@@ -331,6 +386,28 @@ mod tests {
         for _ in 0..14 {
             assert!(!tracker.tick(0, 1));
         }
+        assert!(!tracker.tick(0, 3600));
+        assert!(!tracker.tick(0, 1));
+    }
+
+    #[test]
+    fn requests_surface_recovery_once_after_three_seconds() {
+        let mut tracker = SurfaceRecoveryTracker::default();
+        assert!(!tracker.tick(0, 1));
+        assert!(!tracker.tick(0, 1));
+        assert!(tracker.tick(0, 1));
+        assert!(!tracker.tick(0, 1));
+        assert!(!tracker.tick(1, 1));
+        assert!(!tracker.tick(1, 1));
+        assert!(!tracker.tick(1, 1));
+        assert!(tracker.tick(1, 1));
+    }
+
+    #[test]
+    fn scheduler_gap_does_not_request_surface_recovery() {
+        let mut tracker = SurfaceRecoveryTracker::default();
+        assert!(!tracker.tick(0, 1));
+        assert!(!tracker.tick(0, 1));
         assert!(!tracker.tick(0, 3600));
         assert!(!tracker.tick(0, 1));
     }

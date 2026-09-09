@@ -1187,6 +1187,13 @@ mod windows_native {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
+        if message == crate::widget_diagnostics::COMPOSITION_RECOVERY_MESSAGE {
+            COMPOSITION_REFRESH_REQUESTED.store(true, Ordering::Release);
+            widget_log!(
+                "native-event hwnd={window:p} message=composition-recovery idle_seconds={wparam}"
+            );
+            return 0;
+        }
         // Sparse lifecycle events help correlate stalls with monitor, DWM,
         // sleep/resume and Explorer changes. Never log paint/mouse traffic.
         use windows_sys::Win32::UI::WindowsAndMessaging::{
