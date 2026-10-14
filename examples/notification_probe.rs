@@ -1,5 +1,24 @@
 #[cfg(target_os = "windows")]
 fn main() {
+    if let Some(url) = std::env::args().nth(1) {
+        match schedule_manager::windows_notifications::show_link_notification(
+            "Schedule Manager 链接通知诊断",
+            "点击通知正文或“打开链接”按钮，应在默认浏览器打开指定网页。",
+            &url,
+            true,
+        ) {
+            Ok(()) => println!("notification probe: Windows accepted the protocol link toast"),
+            Err(error) => {
+                eprintln!("notification link probe failed: {error:#}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if let Err(error) = schedule_manager::windows_notifications::prepare_identity() {
+        eprintln!("notification identity preparation failed: {error:#}");
+        std::process::exit(1);
+    }
     let result = notify_rust::Notification::new()
         .summary("Schedule Manager 通知诊断")
         .body("如果你看到这条消息，说明 Windows Toast 通道可以正常展示。")

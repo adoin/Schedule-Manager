@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use std::{os::windows::ffi::OsStrExt, path::PathBuf};
 use windows::{
+    Data::Xml::Dom::XmlDocument,
+    UI::Notifications::{ToastNotification, ToastNotificationManager},
     Win32::{
         Storage::EnhancedStorage::PKEY_AppUserModel_ID,
         System::Com::{
@@ -14,10 +16,84 @@ use windows::{
         },
         UI::WindowsAndMessaging::{MB_ICONEXCLAMATION, SW_SHOWNORMAL},
     },
-    core::{Interface, PCWSTR},
+    core::{HSTRING, Interface, PCWSTR},
 };
 
 pub const APP_USER_MODEL_ID: &str = "Emssion.ScheduleManager";
+
+/// Protocol activation lets Windows open the link even after this process exits
+/// or the toast moves to Action Center. No in-process activation callback is needed.
+pub fn show_link_notification(title: &str, body: &str, url: &str, sound: bool) -> Result<()> {
+    let url = url::Url::parse(url).context("通知链接格式无效")?;
+    anyhow::ensure!(
+        matches!(url.scheme(), "http" | "https") && url.host_str().is_some(),
+        "通知链接必须是 http 或 https 网页地址"
+    );
+    prepare_identity().context("注册链接通知身份失败")?;
+    let document = XmlDocument::new()?;
+    document.LoadXml(&HSTRING::from(link_notification_xml(
+        title,
+        body,
+        url.as_str(),
+    )))?;
+    let toast = ToastNotification::CreateToastNotification(&document)?;
+    let notifier =
+        ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(APP_USER_MODEL_ID))?;
+    notifier.Show(&toast).context("发送链接通知失败")?;
+    if sound {
+        play_reminder_sound();
+    }
+    Ok(())
+}
+
+fn link_notification_xml(title: &str, body: &str, url: &str) -> String {
+    let url = escape_xml(url);
+    format!(
+        "<toast activationType=\"protocol\" launch=\"{url}\"><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual><actions><action content=\"打开链接\" activationType=\"protocol\" arguments=\"{url}\"/></actions><audio silent=\"true\"/></toast>",
+        escape_xml(title),
+        escape_xml(body)
+    )
+}
+
+fn escape_xml(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn link_toast_uses_protocol_for_body_and_button_and_escapes_content() {
+        let xml = link_notification_xml(
+            "会议 <提醒>",
+            "A & B",
+            "https://example.com/?a=1&b=\"中文\"",
+        );
+        assert!(xml.starts_with("<toast activationType=\"protocol\" launch=\"https://example.com/?a=1&amp;b=&quot;中文&quot;\">"));
+        assert!(xml.contains("<action content=\"打开链接\" activationType=\"protocol\" arguments=\"https://example.com/?a=1&amp;b=&quot;中文&quot;\"/>"));
+        assert!(xml.contains("会议 &lt;提醒&gt;"));
+        assert!(xml.contains("A &amp; B"));
+        assert!(xml.contains("<audio silent=\"true\"/>"));
+        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap() };
+        let document = XmlDocument::new().unwrap();
+        document.LoadXml(&HSTRING::from(xml)).unwrap();
+        let root = document.DocumentElement().unwrap();
+        assert_eq!(
+            root.GetAttribute(&HSTRING::from("activationType")).unwrap(),
+            "protocol"
+        );
+        assert_eq!(
+            root.GetAttribute(&HSTRING::from("launch")).unwrap(),
+            "https://example.com/?a=1&b=\"中文\""
+        );
+    }
+}
 
 pub fn prepare_identity() -> Result<()> {
     let app_id = wide(APP_USER_MODEL_ID);

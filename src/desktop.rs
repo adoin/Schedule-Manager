@@ -2378,41 +2378,31 @@ fn show_system_notification(
         .and_then(|value| normalize_notification_url(value).ok())
         .filter(|value| !value.is_empty());
     #[cfg(target_os = "windows")]
+    if let Some(url) = notification_url.as_deref() {
+        return crate::windows_notifications::show_link_notification(
+            title,
+            body,
+            url,
+            sound_enabled,
+        );
+    }
+    #[cfg(target_os = "windows")]
     {
         if crate::windows_notifications::prepare_identity().is_ok() {
             notification.app_id(crate::windows_notifications::APP_USER_MODEL_ID);
-        }
-        if notification_url.is_some() {
-            notification.action("open_url", "打开链接");
         }
     }
     #[cfg(target_os = "macos")]
     if sound_enabled {
         notification.sound_name("default");
     }
-    let handle = notification
+    let _handle = notification
         .show()
         .map_err(|error| anyhow!(error.to_string()))?;
     if sound_enabled {
         #[cfg(target_os = "windows")]
         crate::windows_notifications::play_reminder_sound();
     }
-    #[cfg(target_os = "windows")]
-    if let Some(url) = notification_url {
-        std::thread::spawn(move || {
-            let _ = handle.wait_for_response(move |response: &notify_rust::NotificationResponse| {
-                if matches!(response, notify_rust::NotificationResponse::Default)
-                    || matches!(response, notify_rust::NotificationResponse::Action(action) if action == "open_url")
-                {
-                    if let Err(error) = crate::windows_notifications::open_url(&url) {
-                        app_log(format!("notification link open failed url={url:?} error={error:#}"));
-                    }
-                }
-            });
-        });
-    }
-    #[cfg(not(target_os = "windows"))]
-    drop(handle);
     Ok(())
 }
 
