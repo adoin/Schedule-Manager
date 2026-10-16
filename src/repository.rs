@@ -18,6 +18,7 @@ pub struct PendingForcedReminder {
     pub key: String,
     pub title: String,
     pub body: String,
+    pub notification_url: String,
     pub created_at: String,
 }
 
@@ -335,17 +336,31 @@ impl LocalRepository {
 
     pub fn pending_forced_reminders(&self) -> Result<Vec<PendingForcedReminder>> {
         let mut statement = self.connection.prepare(
-            "SELECT reminder_key,title,body,created_at FROM forced_reminder_pending ORDER BY created_at, reminder_key",
+            "SELECT reminder_key,title,body,created_at,event_id FROM forced_reminder_pending ORDER BY created_at, reminder_key",
         )?;
         let rows = statement.query_map([], |row| {
-            Ok(PendingForcedReminder {
-                key: row.get(0)?,
-                title: row.get(1)?,
-                body: row.get(2)?,
-                created_at: row.get(3)?,
-            })
+            Ok((
+                PendingForcedReminder {
+                    key: row.get(0)?,
+                    title: row.get(1)?,
+                    body: row.get(2)?,
+                    notification_url: String::new(),
+                    created_at: row.get(3)?,
+                },
+                row.get::<_, String>(4)?,
+            ))
         })?;
-        rows.map(|row| Ok(row?)).collect()
+        rows.map(|row| {
+            let (mut reminder, event_id) = row?;
+            // Resolve from the event so reminders queued by older versions and
+            // links edited after delivery both work without a database migration.
+            reminder.notification_url = self
+                .event(&event_id)?
+                .map(|event| event.notification_url)
+                .unwrap_or_default();
+            Ok(reminder)
+        })
+        .collect()
     }
 
     pub fn acknowledge_forced_reminder(&self, key: &str) -> Result<()> {
@@ -415,6 +430,8 @@ mod tests {
         let mut event = CalendarEvent::draft(occurrence, occurrence + Duration::minutes(30));
         event.title = "必须处理".into();
         event.force_reminder = true;
+        event.notification_url = "https://example.com/lunch?a=1&b=2".into();
+        repo.upsert_event(&event).unwrap();
         let key = repo
             .enqueue_forced_reminder(&event, occurrence, 0, "今天开始", occurrence)
             .unwrap();
@@ -425,6 +442,23 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].key, key);
         assert_eq!(pending[0].title, "必须处理");
+        assert_eq!(pending[0].notification_url, event.notification_url);
+        drop(repo);
+        let repo = LocalRepository::open_at(path.clone()).unwrap();
+        assert_eq!(
+            repo.pending_forced_reminders().unwrap()[0].notification_url,
+            event.notification_url
+        );
+        event.notification_url = "https://example.com/updated".into();
+        repo.upsert_event(&event).unwrap();
+        assert_eq!(
+            repo.pending_forced_reminders().unwrap()[0].notification_url,
+            event.notification_url
+        );
+        repo.purge_event(&event.id).unwrap();
+        let pending = repo.pending_forced_reminders().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].notification_url.is_empty());
 
         repo.acknowledge_forced_reminder(&key).unwrap();
         assert!(repo.pending_forced_reminders().unwrap().is_empty());

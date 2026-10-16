@@ -2131,9 +2131,15 @@ fn refresh_forced_reminder_window(reminder: &ForcedReminderWindow) -> Result<boo
         reminder.hide()?;
         return Ok(false);
     };
+    if reminder.get_reminder_key() != current.key.as_str()
+        || reminder.get_reminder_url() != current.notification_url.as_str()
+    {
+        reminder.set_link_error("".into());
+    }
     reminder.set_reminder_key(current.key.clone().into());
     reminder.set_reminder_title(current.title.clone().into());
     reminder.set_reminder_body(current.body.clone().into());
+    reminder.set_reminder_url(current.notification_url.clone().into());
     reminder.set_pending_count(pending.len().min(i32::MAX as usize) as i32);
     if !reminder.window().is_visible() {
         reminder.show()?;
@@ -2155,6 +2161,39 @@ fn refresh_forced_reminder_window(reminder: &ForcedReminderWindow) -> Result<boo
 }
 
 fn wire_forced_reminder_callbacks(app: &AppWindow, reminder: &ForcedReminderWindow) {
+    let weak_reminder = reminder.as_weak();
+    reminder.on_open_link(move || {
+        let Some(reminder) = weak_reminder.upgrade() else {
+            return;
+        };
+        let result = (|| -> Result<()> {
+            let url = normalize_notification_url(&reminder.get_reminder_url())?;
+            anyhow::ensure!(!url.is_empty(), "此提醒没有配置链接");
+            #[cfg(target_os = "windows")]
+            crate::windows_notifications::open_url(&url)?;
+            #[cfg(not(target_os = "windows"))]
+            {
+                let launcher = if cfg!(target_os = "macos") {
+                    "open"
+                } else {
+                    "xdg-open"
+                };
+                let status = std::process::Command::new(launcher)
+                    .arg(&url)
+                    .status()
+                    .context("无法启动默认浏览器")?;
+                anyhow::ensure!(status.success(), "默认浏览器打开失败：{status}");
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => reminder.set_link_error("".into()),
+            Err(error) => {
+                app_log(format!("forced reminder link open failed: {error:#}"));
+                reminder.set_link_error(format!("打开链接失败：{error}").into());
+            }
+        }
+    });
     let drag_origin = Arc::new(Mutex::new(None::<DesktopDragOrigin>));
     let weak_reminder = reminder.as_weak();
     let drag_origin_for_start = drag_origin.clone();

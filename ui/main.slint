@@ -634,8 +634,11 @@ export component ForcedReminderWindow inherits Window {
     in-out property <string> reminder-key;
     in-out property <string> reminder-title;
     in-out property <string> reminder-body;
+    in-out property <string> reminder-url;
+    in-out property <string> link-error;
     in-out property <int> pending-count: 1;
     callback acknowledged();
+    callback open-link();
     callback start-drag();
     callback drag-move();
     callback end-drag();
@@ -703,11 +706,27 @@ export component ForcedReminderWindow inherits Window {
                 color: Theme.muted; font-size: 12px;
                 wrap: word-wrap; vertical-stretch: 1;
             }
-            SoftButton {
+            if root.link-error != "": Text {
+                text: root.link-error;
+                color: Theme.danger; font-size: 11px;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
                 height: 38px;
-                label: "已处理";
-                emphasized: true;
-                clicked => { root.acknowledged(); }
+                spacing: 10px;
+                if root.reminder-url != "": SoftButton {
+                    horizontal-stretch: 1;
+                    height: 38px;
+                    label: "打开链接";
+                    clicked => { root.open-link(); }
+                }
+                SoftButton {
+                    horizontal-stretch: 1;
+                    height: 38px;
+                    label: "已处理";
+                    emphasized: true;
+                    clicked => { root.acknowledged(); }
+                }
             }
         }
     }
