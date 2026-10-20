@@ -1,6 +1,6 @@
 use crate::{
     DEFAULT_API_BASE_URL,
-    api_client::ApiClient,
+    api_client::{ApiClient, ApiResponseError},
     calendar::{
         ScheduleKind, event_occurs_on, is_legal_rest_day, lunar_date_label, lunar_festival,
         lunar_label, lunar_parts, occurrence_start, schedule_kind, yearly_lunar_parts,
@@ -597,6 +597,23 @@ fn wire_callbacks(
                                     app.set_editor_feedback(message.clone().into());
                                     app.set_editor_feedback_error(true);
                                     app.set_status(message.into());
+                                    if error.downcast_ref::<ApiResponseError>().is_some_and(
+                                        |error| error.status == 401 || error.code == Some(401),
+                                    ) {
+                                        // Keep the editor and its unsaved fields intact while
+                                        // offering reauthentication for an expired session.
+                                        if let Ok(state) = shared_thread.lock() {
+                                            app.set_auth_email(
+                                                state.email.as_deref().unwrap_or("").into(),
+                                            );
+                                        }
+                                        app.set_register_mode(false);
+                                        app.set_auth_password("".into());
+                                        app.set_auth_message(
+                                            format!("{error}；登录后请再次点击保存").into(),
+                                        );
+                                        app.set_auth_visible(true);
+                                    }
                                 }
                             }
                         });

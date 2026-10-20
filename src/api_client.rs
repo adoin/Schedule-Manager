@@ -21,6 +21,55 @@ pub struct ApiClient {
     tls: Arc<SslConnector>,
 }
 
+#[derive(Debug)]
+pub struct ApiResponseError {
+    pub status: u16,
+    pub code: Option<i32>,
+    message: String,
+}
+
+impl std::fmt::Display for ApiResponseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ApiResponseError {}
+
+fn decode_api_response<T: DeserializeOwned>(status: u16, body: &[u8], path: &str) -> Result<T> {
+    // Error envelopes contain an empty object rather than the endpoint's success
+    // payload. Check the envelope before deserializing the requested data type.
+    let envelope: ApiEnvelope<Value> = match serde_json::from_slice(body) {
+        Ok(envelope) => envelope,
+        Err(_) if !(200..300).contains(&status) => {
+            return Err(ApiResponseError {
+                status,
+                code: None,
+                message: format!("云端服务响应异常（HTTP {status}），请稍后重试"),
+            }
+            .into());
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("云端响应格式无效（{path}，HTTP {status}）"));
+        }
+    };
+    if !(200..300).contains(&status) || envelope.code != 0 {
+        return Err(ApiResponseError {
+            status,
+            code: Some(envelope.code),
+            message: if envelope.message.trim().is_empty() {
+                format!("云端请求失败（HTTP {status}，错误码 {}）", envelope.code)
+            } else {
+                envelope.message
+            },
+        }
+        .into());
+    }
+    serde_json::from_value(envelope.data)
+        .with_context(|| format!("云端返回的数据格式无效（{path}）"))
+}
+
 impl ApiClient {
     pub fn new(base_url: impl Into<String>, token: Option<String>) -> Result<Self> {
         Ok(Self {
@@ -87,12 +136,7 @@ impl ApiClient {
             .with_context(|| format!("read {path}"))?;
         let (status, response_body) = parse_http_response(&response)
             .with_context(|| format!("decode HTTP response for {path}"))?;
-        let envelope: ApiEnvelope<T> = serde_json::from_slice(&response_body)
-            .with_context(|| format!("decode JSON response for {path}"))?;
-        if !(200..300).contains(&status) || envelope.code != 0 {
-            bail!("{}", envelope.message);
-        }
-        Ok(envelope.data)
+        decode_api_response(status, &response_body, path)
     }
 
     pub fn request_code(&self, email: &str) -> Result<()> {
@@ -225,7 +269,73 @@ fn decode_chunked(mut input: &[u8]) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_chunked, parse_http_response};
+    use super::{ApiResponseError, decode_api_response, decode_chunked, parse_http_response};
+    use crate::models::CalendarEvent;
+
+    #[test]
+    fn error_envelope_preserves_auth_conflict_and_validation_messages() {
+        for (status, message) in [
+            (401, "登录已过期，请重新登录"),
+            (409, "此日程已在其他设备更新，请先同步"),
+            (400, "通知链接格式无效"),
+        ] {
+            let body =
+                serde_json::to_vec(&serde_json::json!({"code":status,"message":message,"data":{}}))
+                    .unwrap();
+            let error =
+                decode_api_response::<CalendarEvent>(status, &body, "/events/upsert").unwrap_err();
+            assert_eq!(error.to_string(), message);
+            assert_eq!(
+                error.downcast_ref::<ApiResponseError>().unwrap().status,
+                status
+            );
+        }
+    }
+
+    #[test]
+    fn application_errors_are_checked_even_with_http_success() {
+        let error = decode_api_response::<CalendarEvent>(
+            200,
+            br#"{"code":409,"message":"conflict","data":null}"#,
+            "/events/upsert",
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "conflict");
+        assert_eq!(
+            error.downcast_ref::<ApiResponseError>().unwrap().code,
+            Some(409)
+        );
+    }
+
+    #[test]
+    fn invalid_http_error_response_reports_status_without_echoing_body() {
+        let error = decode_api_response::<CalendarEvent>(
+            502,
+            b"<html>upstream error</html>",
+            "/events/upsert",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("HTTP 502"));
+        assert!(!error.to_string().contains("<html>"));
+    }
+
+    #[test]
+    fn successful_event_response_still_decodes_and_checks_payload() {
+        let now = chrono::Utc::now();
+        let event = CalendarEvent::draft(now, now + chrono::Duration::minutes(30));
+        let body =
+            serde_json::to_vec(&serde_json::json!({"code":0,"message":"ok","data":event})).unwrap();
+        let decoded: CalendarEvent = decode_api_response(200, &body, "/events/upsert").unwrap();
+        assert_eq!(decoded, event);
+        assert!(
+            decode_api_response::<CalendarEvent>(
+                200,
+                br#"{"code":0,"message":"ok","data":{}}"#,
+                "/events/upsert"
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn parses_content_length_response() {
