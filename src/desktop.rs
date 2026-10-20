@@ -263,6 +263,26 @@ pub fn run() -> Result<()> {
     };
     start_reminder_timer(&app, &forced_reminder);
     start_sync_timer(&app, state.clone());
+    #[cfg(target_os = "windows")]
+    let _upgrade_exit_timer = {
+        let timer = Timer::default();
+        let weak_app = app.as_weak();
+        timer.start(
+            TimerMode::Repeated,
+            StdDuration::from_millis(200),
+            move || {
+                if crate::windows_lifecycle::upgrade_requested() {
+                    app_log("upgrade shutdown requested; pending reminders remain persisted");
+                    let _ = mark_watcher_intentional_exit();
+                    if let Some(app) = weak_app.upgrade() {
+                        let _ = app.hide();
+                    }
+                    let _ = slint::quit_event_loop();
+                }
+            },
+        );
+        timer
+    };
     refresh_holidays_in_background(&app, state.clone());
     if state
         .lock()
@@ -2920,6 +2940,7 @@ fn spawn_external_desktop_widget(app: &AppWindow) -> Result<()> {
         .with_context(|| format!("无法创建挂件错误日志：{}", log_path.display()))?;
     let stdout = stderr.try_clone().context("无法复制挂件日志句柄")?;
     let mut child = Command::new(&executable)
+        .args(["--parent-pid", &std::process::id().to_string()])
         .env("RUST_BACKTRACE", "full")
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))

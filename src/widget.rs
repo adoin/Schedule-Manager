@@ -88,6 +88,17 @@ struct WidgetCommand<'a> {
     created_at: i64,
 }
 
+fn upgrade_requested_for_widget() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        crate::windows_lifecycle::upgrade_requested()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
 pub fn run() -> Result<()> {
     #[cfg(target_os = "windows")]
     let _single_instance = match windows_native::single_instance()? {
@@ -640,7 +651,10 @@ impl CalendarWidgetApp {
 impl eframe::App for CalendarWidgetApp {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         crate::widget_diagnostics::progress(1);
-        if take_exit_signal() || crate::widget_diagnostics::exit_requested() {
+        if take_exit_signal()
+            || crate::widget_diagnostics::exit_requested()
+            || cfg!(target_os = "windows") && upgrade_requested_for_widget()
+        {
             crate::widget_diagnostics::request_exit();
             ctx.send_viewport_cmd(ViewportCommand::Close);
             return;

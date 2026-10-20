@@ -11,6 +11,8 @@ pub mod widget;
 #[cfg(feature = "desktop")]
 pub mod widget_diagnostics;
 #[cfg(all(feature = "desktop", target_os = "windows"))]
+pub mod windows_lifecycle;
+#[cfg(all(feature = "desktop", target_os = "windows"))]
 pub mod windows_notifications;
 
 pub const DEFAULT_API_BASE_URL: &str = "https://novel.emssion.com/schedule";

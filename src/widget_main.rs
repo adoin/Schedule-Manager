@@ -14,6 +14,11 @@ fn main() {
         }
         return;
     }
+    #[cfg(target_os = "windows")]
+    if let Err(error) = schedule_manager::windows_lifecycle::watch_parent() {
+        widget_log(format!("parent watch failed: {error:#}"));
+        std::process::exit(1);
+    }
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         widget_log(format!(
