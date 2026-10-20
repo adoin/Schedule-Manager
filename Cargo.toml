@@ -1,6 +1,6 @@
 [package]
 name = "schedule-manager"
-version = "1.0.19"
+version = "1.0.20"
 edition = "2024"
 description = "Cross-platform Chinese calendar and schedule manager"
 license = "MIT"

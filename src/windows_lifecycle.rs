@@ -89,6 +89,34 @@ fn installed_binary(path: &Path, directory: &Path) -> bool {
             .is_some_and(|parent| normalized(parent) == normalized(directory))
 }
 
+fn running_image(process: &OwnedHandle) -> Result<Option<PathBuf>> {
+    let deadline = Instant::now() + Duration::from_millis(500);
+    loop {
+        if exited(process) {
+            return Ok(None);
+        }
+        let mut path = vec![0u16; 32768];
+        let mut length = path.len() as u32;
+        if unsafe {
+            QueryFullProcessImageNameW(process.as_raw_handle(), 0, path.as_mut_ptr(), &mut length)
+        } != 0
+        {
+            return Ok(Some(PathBuf::from(String::from_utf16_lossy(
+                &path[..length as usize],
+            ))));
+        }
+        let error = std::io::Error::last_os_error();
+        // A process can appear in the snapshot while its image is loading or
+        // being torn down. Wait on its handle before treating access as denied.
+        if unsafe { WaitForSingleObject(process.as_raw_handle(), 50) } == WAIT_OBJECT_0 {
+            return Ok(None);
+        }
+        if Instant::now() >= deadline {
+            return Err(error).context("无法确认运行程序的安装目录");
+        }
+    }
+}
+
 fn installation_processes(directory: &Path) -> Result<Vec<OwnedHandle>> {
     let snapshot = owned(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) })?;
     let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
@@ -126,25 +154,7 @@ fn installation_processes(directory: &Path) -> Result<Vec<OwnedHandle>> {
                 }
             } else {
                 let handle = owned(handle)?;
-                let mut path = vec![0u16; 32768];
-                let mut length = path.len() as u32;
-                if unsafe {
-                    QueryFullProcessImageNameW(
-                        handle.as_raw_handle(),
-                        0,
-                        path.as_mut_ptr(),
-                        &mut length,
-                    )
-                } == 0
-                {
-                    if unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) } != WAIT_OBJECT_0 {
-                        return Err(std::io::Error::last_os_error())
-                            .context("无法确认运行程序的安装目录");
-                    }
-                } else if installed_binary(
-                    &PathBuf::from(String::from_utf16_lossy(&path[..length as usize])),
-                    directory,
-                ) {
+                if running_image(&handle)?.is_some_and(|path| installed_binary(&path, directory)) {
                     processes.push(handle);
                 }
             }
@@ -165,12 +175,13 @@ pub fn stop_installation(directory: &Path) -> Result<()> {
     let directory = std::fs::canonicalize(directory).context("无法确认安装目录")?;
     anyhow::ensure!(directory.is_dir(), "安装目录无效");
     let signal = event_for(&directory)?;
+    // Establish ownership before asking cooperative processes to exit.
+    let mut processes = installation_processes(&directory)?;
     anyhow::ensure!(
         unsafe { SetEvent(signal.as_raw_handle()) } != 0,
         "无法发送升级退出请求"
     );
     // Hold process handles throughout shutdown, so a reused PID cannot be killed.
-    let mut processes = installation_processes(&directory)?;
     let deadline = Instant::now() + Duration::from_secs(5);
     while processes.iter().any(|process| !exited(process)) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(100));
@@ -245,18 +256,9 @@ fn watch_parent_id(pid: u32) -> Result<()> {
         std::process::exit(0);
     }
     let parent = owned(raw).context("无法监测主程序生命周期")?;
-    let mut image = vec![0u16; 32768];
-    let mut length = image.len() as u32;
-    if unsafe {
-        QueryFullProcessImageNameW(parent.as_raw_handle(), 0, image.as_mut_ptr(), &mut length)
-    } == 0
-    {
-        if exited(&parent) {
-            std::process::exit(0);
-        }
-        return Err(std::io::Error::last_os_error()).context("无法确认主程序身份");
-    }
-    let image = PathBuf::from(String::from_utf16_lossy(&image[..length as usize]));
+    let Some(image) = running_image(&parent)? else {
+        std::process::exit(0);
+    };
     let executable = std::env::current_exe()?;
     if !image.file_name().is_some_and(|name| {
         ["ScheduleManager.exe", "schedule-manager.exe"]
