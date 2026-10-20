@@ -1203,30 +1203,59 @@ export component AppWindow inherits Window {
         background: #27232e66;
         TouchArea { clicked => { } }
         Island {
-            width: 390px; height: root.register-mode ? 470px : 355px;
+            width: min(390px, parent.width - 40px);
+            height: min(parent.height - 40px, auth-layout.preferred-height);
             x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
-            VerticalLayout {
-                padding: 24px; spacing: 10px;
-                HorizontalLayout { height: 34px;
-                    Text { text: root.register-mode ? "创建同步账户" : "登录同步账户"; color: Theme.ink; font-size: 20px; font-weight: 800; horizontal-stretch: 1; }
+            auth-layout := VerticalLayout {
+                padding-top: 24px; padding-bottom: 24px;
+                padding-left: 24px; padding-right: 6px; spacing: 16px;
+                HorizontalLayout { height: 34px; padding-right: 18px;
+                    Text { text: root.register-mode ? "创建同步账户" : "登录同步账户"; color: Theme.ink; font-size: 20px; font-weight: 800; horizontal-stretch: 1; vertical-alignment: center; }
                     SoftButton { width: 34px; label: "×"; clicked => { root.auth-visible = false; } }
                 }
-                Text { text: "邮箱"; color: Theme.muted; font-size: 10px; }
-                Field { value <=> root.auth-email; placeholder: "name@example.com"; }
-                if root.register-mode : Text { text: "昵称"; color: Theme.muted; font-size: 10px; }
-                if root.register-mode : Field { value <=> root.auth-display-name; placeholder: "你的昵称"; }
-                Text { text: "密码"; color: Theme.muted; font-size: 10px; }
-                Field { value <=> root.auth-password; placeholder: "至少 8 位"; password: true; }
-                if root.register-mode : HorizontalLayout {
-                    spacing: 7px;
-                    Field { value <=> root.auth-code; placeholder: "6 位验证码"; horizontal-stretch: 1; }
-                    SoftButton { width: 108px; label: "获取验证码"; clicked => { root.request-code(); } }
+                ScrollView {
+                    min-height: 0px;
+                    preferred-height: auth-content.preferred-height;
+                    // Fluent scrollbars overlay the viewport. Reserve their
+                    // gutter inside the card's right padding, away from fields.
+                    viewport-width: self.visible-width - 18px;
+                    viewport-height: max(self.visible-height, auth-content.preferred-height);
+                    horizontal-scrollbar-policy: always-off;
+                    auth-content := VerticalLayout {
+                        spacing: 14px;
+                        // Keep button shadows inside the clipped scroll viewport.
+                        padding-left: 2px; padding-right: 2px; padding-bottom: 7px;
+                        VerticalLayout {
+                            spacing: 6px;
+                            Text { text: "邮箱"; color: Theme.muted; font-size: 10px; }
+                            Field { value <=> root.auth-email; placeholder: "name@example.com"; }
+                        }
+                        if root.register-mode : VerticalLayout {
+                            spacing: 6px;
+                            Text { text: "昵称"; color: Theme.muted; font-size: 10px; }
+                            Field { value <=> root.auth-display-name; placeholder: "你的昵称"; }
+                        }
+                        VerticalLayout {
+                            spacing: 6px;
+                            Text { text: "密码"; color: Theme.muted; font-size: 10px; }
+                            Field { value <=> root.auth-password; placeholder: "至少 8 位"; password: true; }
+                        }
+                        if root.register-mode : HorizontalLayout {
+                            height: 38px; spacing: 7px;
+                            Field { value <=> root.auth-code; placeholder: "6 位验证码"; horizontal-stretch: 1; }
+                            SoftButton { height: 38px; width: 108px; label: "获取验证码"; clicked => { root.request-code(); } }
+                        }
+                        if root.auth-message != "" : Text {
+                            text: root.auth-message; color: Theme.danger; font-size: 11px; wrap: word-wrap;
+                        }
+                        VerticalLayout {
+                            padding-top: 4px; spacing: 10px;
+                            SoftButton { label: root.register-mode ? "注册并开始同步" : "登录"; emphasized: true; clicked => { root.submit-auth(); } }
+                            SoftButton { label: root.register-mode ? "已有账户，去登录" : "没有账户，去注册"; clicked => { root.register-mode = !root.register-mode; root.auth-message = ""; } }
+                            if root.signed-in : SoftButton { label: "退出当前账户"; danger: true; clicked => { root.logout(); } }
+                        }
+                    }
                 }
-                Text { text: root.auth-message; color: Theme.danger; font-size: 11px; wrap: word-wrap; }
-                Rectangle { vertical-stretch: 1; }
-                SoftButton { label: root.register-mode ? "注册并开始同步" : "登录"; emphasized: true; clicked => { root.submit-auth(); } }
-                SoftButton { label: root.register-mode ? "已有账户，去登录" : "没有账户，去注册"; clicked => { root.register-mode = !root.register-mode; root.auth-message = ""; } }
-                SoftButton { visible: root.signed-in; label: "退出当前账户"; danger: true; clicked => { root.logout(); } }
             }
         }
     }
