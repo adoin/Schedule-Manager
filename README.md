@@ -97,6 +97,8 @@ pwsh.exe -NoLogo -NoProfile -File .\scripts\collect-widget-diagnostics.ps1
 
 ## 服务端
 
+Windows 客户端发布不会更新云端服务。涉及日程字段的改动必须同时验证服务端：通知链接要求 `/schedule/health` 返回 `data.capabilities.notificationUrl=true`，并验证 `/events/upsert` 保存后经 `/sync/pull` 仍能取回完整链接。服务端 0.1.1 增加了能力标识和该回归测试。
+
 服务端是独立 Cargo 包，不编译 Slint：
 
 ```bash

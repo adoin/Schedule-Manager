@@ -1,6 +1,6 @@
 [package]
 name = "schedule-api"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Schedule Manager sync and authentication API"
 license = "MIT"

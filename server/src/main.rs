@@ -214,7 +214,9 @@ async fn health(State(state): State<AppState>) -> ApiResult<Value> {
     let db = state.db.lock().map_err(ApiError::internal)?;
     db.query_row("SELECT 1", [], |_| Ok(()))
         .map_err(ApiError::internal)?;
-    Ok(ok(json!({"status":"ok","time":Utc::now()})))
+    Ok(ok(
+        json!({"status":"ok","time":Utc::now(),"version":env!("CARGO_PKG_VERSION"),"capabilities":{"notificationUrl":true}}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -768,6 +770,84 @@ fn send_verification_email(config: &Config, recipient: &str, code: &str) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_state() -> (AppState, HeaderMap) {
+        let db = Connection::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        db.execute("INSERT INTO users(id,email,display_name,password_hash,created_at) VALUES('test-user','test@example.com','test','unused',?1)", [Utc::now().to_rfc3339()]).unwrap();
+        let token = create_session(&db, "test-user").unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        let config = Config {
+            bind: "127.0.0.1:0".into(),
+            database_path: ":memory:".into(),
+            public_base_url: "http://localhost".into(),
+            email_delivery: "console".into(),
+            email_from: "test@example.com".into(),
+            smtp_host: String::new(),
+            smtp_port: 465,
+            smtp_username: String::new(),
+            smtp_password: String::new(),
+        };
+        (
+            AppState {
+                db: Arc::new(Mutex::new(db)),
+                config: Arc::new(config),
+                http: reqwest::Client::new(),
+            },
+            headers,
+        )
+    }
+
+    #[tokio::test]
+    async fn saving_and_pulling_an_event_preserves_the_notification_link() {
+        let (state, headers) = test_state();
+        let now = Utc::now();
+        let mut event = CalendarEvent::draft(now, now + Duration::minutes(1));
+        event.title = "daily lunch".into();
+        event.force_reminder = true;
+        event.notification_url = "https://example.com/static/food-order/#/food-order".into();
+        let Json(saved) = upsert_event(State(state.clone()), headers.clone(), Json(event.clone()))
+            .await
+            .unwrap_or_else(|error| panic!("{}", error.1));
+        assert_eq!(saved.data.notification_url, event.notification_url);
+        assert_eq!(
+            serde_json::to_value(&saved).unwrap()["data"]["notificationUrl"],
+            event.notification_url
+        );
+        let stored: Value = {
+            let db = state.db.lock().unwrap();
+            let payload: String = db
+                .query_row(
+                    "SELECT payload FROM events WHERE id=?1",
+                    [&event.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            serde_json::from_str(&payload).unwrap()
+        };
+        assert_eq!(stored["notificationUrl"], event.notification_url);
+        let Json(pulled) = sync_pull(
+            State(state.clone()),
+            headers,
+            Json(PullRequest { cursor: 0 }),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{}", error.1));
+        assert_eq!(pulled.data.events.len(), 1);
+        assert_eq!(
+            pulled.data.events[0].notification_url,
+            event.notification_url
+        );
+        let Json(health) = health(State(state))
+            .await
+            .unwrap_or_else(|error| panic!("{}", error.1));
+        assert_eq!(health.data["capabilities"]["notificationUrl"], true);
+        assert_eq!(health.data["version"], env!("CARGO_PKG_VERSION"));
+    }
 
     #[test]
     fn token_hash_is_stable_and_password_roundtrips() {
