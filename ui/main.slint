@@ -711,13 +711,19 @@ export component ForcedReminderWindow inherits Window {
                 color: Theme.danger; font-size: 11px;
                 wrap: word-wrap;
             }
+            if root.reminder-url == "" && root.link-error == "": Text {
+                text: "这条日程没有已保存的通知链接，请在主程序中编辑并保存。";
+                color: Theme.muted; font-size: 11px;
+                wrap: word-wrap;
+            }
             HorizontalLayout {
                 height: 38px;
                 spacing: 10px;
-                if root.reminder-url != "": SoftButton {
+                SoftButton {
                     horizontal-stretch: 1;
                     height: 38px;
                     label: "打开链接";
+                    enabled: root.reminder-url != "";
                     clicked => { root.open-link(); }
                 }
                 SoftButton {

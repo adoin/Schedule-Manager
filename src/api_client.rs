@@ -174,7 +174,27 @@ impl ApiClient {
     }
 
     pub fn upsert_event(&self, event: &CalendarEvent) -> Result<CalendarEvent> {
-        self.send("/events/upsert", event)
+        if !event.notification_url.is_empty() {
+            let health = self.health()?;
+            if health
+                .pointer("/capabilities/notificationUrl")
+                .and_then(Value::as_bool)
+                != Some(true)
+            {
+                bail!("云端服务尚未支持通知链接，请更新云端服务后重试；本次输入已保留");
+            }
+        }
+        let saved: CalendarEvent = self.send("/events/upsert", event)?;
+        if !event.notification_url.is_empty() && saved.notification_url.is_empty() {
+            bail!("云端未保存通知链接，本次输入已保留，请检查云端服务版本");
+        }
+        if !event.notification_url.is_empty()
+            && url::Url::parse(&event.notification_url).ok()
+                != url::Url::parse(&saved.notification_url).ok()
+        {
+            bail!("云端返回的通知链接与保存值不一致，本次输入已保留");
+        }
+        Ok(saved)
     }
 
     pub fn delete_event(&self, id: &str, base_version: i64) -> Result<CalendarEvent> {
@@ -269,8 +289,120 @@ fn decode_chunked(mut input: &[u8]) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ApiResponseError, decode_api_response, decode_chunked, parse_http_response};
+    use super::{
+        ApiClient, ApiResponseError, decode_api_response, decode_chunked, parse_http_response,
+    };
     use crate::models::CalendarEvent;
+
+    fn mock_api(
+        responses: Vec<serde_json::Value>,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let thread = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for response in responses {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 1024];
+                loop {
+                    let read = socket.read(&mut buffer).unwrap();
+                    assert!(read > 0);
+                    request.extend_from_slice(&buffer[..read]);
+                    if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..end]);
+                        let length: usize = headers
+                            .lines()
+                            .find_map(|line| line.strip_prefix("Content-Length: "))
+                            .unwrap()
+                            .parse()
+                            .unwrap();
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                requests.push(
+                    String::from_utf8_lossy(&request)
+                        .lines()
+                        .next()
+                        .unwrap()
+                        .to_string(),
+                );
+                let body = serde_json::to_vec(&response).unwrap();
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                socket.write_all(&body).unwrap();
+            }
+            requests
+        });
+        (address, thread)
+    }
+
+    #[test]
+    fn legacy_cloud_is_rejected_before_writing_a_linked_event() {
+        let (base, mock) = mock_api(vec![
+            serde_json::json!({"code":0,"message":"ok","data":{"status":"ok"}}),
+        ]);
+        let now = chrono::Utc::now();
+        let mut event = CalendarEvent::draft(now, now + chrono::Duration::minutes(1));
+        event.notification_url = "https://example.com/orders/#/food-order".into();
+        let error = ApiClient::new(base, None)
+            .unwrap()
+            .upsert_event(&event)
+            .unwrap_err();
+        assert!(error.to_string().contains("尚未支持通知链接"));
+        assert_eq!(mock.join().unwrap(), ["POST /health HTTP/1.1"]);
+    }
+
+    #[test]
+    fn linked_event_round_trip_and_missing_link_response_are_checked() {
+        let now = chrono::Utc::now();
+        let mut event = CalendarEvent::draft(now, now + chrono::Duration::minutes(1));
+        event.notification_url = "https://example.com/orders/#/food-order".into();
+        for mode in [0, 1, 2] {
+            let mut saved = serde_json::to_value(&event).unwrap();
+            if mode == 1 {
+                saved.as_object_mut().unwrap().remove("notificationUrl");
+            } else if mode == 2 {
+                saved["notificationUrl"] = serde_json::json!("https://example.com/wrong-link");
+            }
+            let (base, mock) = mock_api(vec![
+                serde_json::json!({"code":0,"message":"ok","data":{"capabilities":{"notificationUrl":true}}}),
+                serde_json::json!({"code":0,"message":"ok","data":saved}),
+            ]);
+            let result = ApiClient::new(base, None).unwrap().upsert_event(&event);
+            if mode == 1 {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("云端未保存通知链接")
+                );
+            } else if mode == 2 {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("通知链接与保存值不一致")
+                );
+            } else {
+                assert_eq!(result.unwrap().notification_url, event.notification_url);
+            }
+            assert_eq!(
+                mock.join().unwrap(),
+                ["POST /health HTTP/1.1", "POST /events/upsert HTTP/1.1"]
+            );
+        }
+    }
 
     #[test]
     fn error_envelope_preserves_auth_conflict_and_validation_messages() {

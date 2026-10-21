@@ -2197,7 +2197,7 @@ fn refresh_forced_reminder_window(reminder: &ForcedReminderWindow) -> Result<boo
     Ok(true)
 }
 
-fn wire_forced_reminder_callbacks(app: &AppWindow, reminder: &ForcedReminderWindow) {
+pub fn wire_reminder_link_handler(reminder: &ForcedReminderWindow) {
     let weak_reminder = reminder.as_weak();
     reminder.on_open_link(move || {
         let Some(reminder) = weak_reminder.upgrade() else {
@@ -2231,6 +2231,10 @@ fn wire_forced_reminder_callbacks(app: &AppWindow, reminder: &ForcedReminderWind
             }
         }
     });
+}
+
+fn wire_forced_reminder_callbacks(app: &AppWindow, reminder: &ForcedReminderWindow) {
+    wire_reminder_link_handler(reminder);
     let drag_origin = Arc::new(Mutex::new(None::<DesktopDragOrigin>));
     let weak_reminder = reminder.as_weak();
     let drag_origin_for_start = drag_origin.clone();
